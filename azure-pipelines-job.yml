@@ -36,7 +36,7 @@ jobs:
           cargo build --bin seed-converter
         displayName: 'Build MM2'
       - bash: |
-          cp -r target/debug/seed-converted upload/seed-converted-$(Agent.OS)
+          cp -r target/debug/seed-converter upload/seed-converter-$(Agent.OS)
         displayName: 'Prepare upload'
       # https://docs.microsoft.com/en-us/azure/devops/pipelines/tasks/deploy/copy-files-over-ssh?view=vsts
       - task: CopyFilesOverSSH@0
