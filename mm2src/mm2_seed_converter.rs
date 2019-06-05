@@ -1,5 +1,12 @@
-use bitcrypto::sha256;
+use sha2::{Sha256, Digest};
 use hex;
+
+#[inline]
+pub fn sha256(input: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.input(input);
+    hasher.result().to_vec()
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -16,5 +23,5 @@ fn main() {
     hash[31] |= 64;
 
     println!("Your ETH privkey derived from seed:");
-    println!("0x{}", hex::encode(hash.to_vec()));
+    println!("0x{}", hex::encode(hash));
 }
