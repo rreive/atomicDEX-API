@@ -581,7 +581,7 @@ impl LogState {
     pub fn mm(_conf: &Json) -> LogState {
         let dashboard = Arc::new(DuplexMutex::new(Vec::new()));
 
-        spawn(log_dashboard_sometimes(Arc::downgrade(&dashboard)));
+        // spawn(log_dashboard_sometimes(Arc::downgrade(&dashboard)));
 
         LogState {
             dashboard,

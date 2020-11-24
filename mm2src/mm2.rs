@@ -77,7 +77,8 @@ pub fn lp_main(conf: Json, ctx_cb: &dyn Fn(u32)) -> Result<(), String> {
             log!("Warning: couldn't initialize metricx system: "(err));
         }
         ctx_cb(try_s!(ctx.ffi_handle()));
-        try_s!(block_on(lp_init(pubport, ctx)));
+        let mut runtime = try_s!(tokio::runtime::Runtime::new());
+        try_s!(runtime.block_on(lp_init(pubport, ctx)));
         Ok(())
     } else {
         ERR!("!passphrase")

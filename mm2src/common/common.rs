@@ -662,7 +662,7 @@ pub mod wio {
 
     lazy_static! {
         /// Shared asynchronous reactor.
-        pub static ref CORE: MM2Runtime = start_core_thread();
+        // pub static ref CORE: MM2Runtime = start_core_thread();
         /// Shared CPU pool to run intensive/sleeping requests on a separate thread.
         ///
         /// Deprecated, prefer the futures 0.3 `POOL` instead.
@@ -691,7 +691,7 @@ pub mod wio {
         E: Send + 'static,
     {
         let (sx, rx) = oneshot::channel();
-        CORE.0.spawn(
+        tokio::spawn(
             f.then(move |fr: Result<R, E>| -> Result<(), ()> {
                 let _ = sx.send(fr);
                 Ok(())
@@ -707,7 +707,7 @@ pub mod wio {
         O: Send + 'static,
     {
         let (sx, rx) = futures::channel::oneshot::channel();
-        CORE.0.spawn(async move {
+        tokio::spawn(async move {
             let res = f.await;
             if sx.send(res).is_err() {
                 log!("drive03 receiver is dropped");
@@ -810,7 +810,7 @@ pub mod wio {
         pub static ref HYPER: Client<HttpsConnector<HttpConnector>> = {
             let https = HttpsConnector::new();
             Client::builder()
-                .executor(&*CORE)
+                // .executor(&*CORE)
                 // Hyper had a lot of Keep-Alive bugs over the years and I suspect
                 // that with the shared client we might be getting errno 10054
                 // due to a closed Keep-Alive connection mismanagement.
@@ -1023,7 +1023,7 @@ pub mod executor {
     use std::thread;
     use std::time::Duration;
 
-    pub fn spawn(future: impl Future03<Output = ()> + Send + 'static) { crate::wio::CORE.0.spawn(future); }
+    pub fn spawn(future: impl Future03<Output = ()> + Send + 'static) { tokio::spawn(future); }
 
     pub fn spawn_boxed(future: Box<dyn Future03<Output = ()> + Send + Unpin + 'static>) { spawn(future); }
 

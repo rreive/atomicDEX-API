@@ -22,7 +22,7 @@
 use coins::{convert_address, get_enabled_coins, get_trade_fee, kmd_rewards_info, my_tx_history, send_raw_transaction,
             set_required_confirmations, set_requires_notarization, show_priv_key, validate_address, withdraw};
 use common::mm_ctx::MmArc;
-#[cfg(feature = "native")] use common::wio::{CORE, CPUPOOL};
+#[cfg(feature = "native")] use common::wio::CPUPOOL;
 use common::{err_to_rpc_json_string, err_tp_rpc_json, HyRes};
 use futures::compat::Future01CompatExt;
 use futures::future::{join_all, FutureExt, TryFutureExt};
@@ -288,52 +288,52 @@ pub extern "C" fn spawn_rpc(ctx_h: u32) {
     let ctx = unwrap!(MmArc::from_ffi_handle(ctx_h), "No context");
 
     let rpc_ip_port = unwrap!(ctx.rpc_ip_port());
-    CORE.0.enter(|| {
-        let server = unwrap!(Server::try_bind(&rpc_ip_port), "Can't bind on {}", rpc_ip_port);
-        let make_svc = make_service_fn(move |socket: &AddrStream| {
-            let remote_addr = socket.remote_addr();
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req: Request<Body>| async move {
-                    let res = rpc_service(req, ctx_h, remote_addr).await;
-                    Ok::<_, Infallible>(res)
-                }))
-            }
-        });
-
-        let (shutdown_tx, shutdown_rx) = futures::channel::oneshot::channel::<()>();
-        let mut shutdown_tx = Some(shutdown_tx);
-        ctx.on_stop(Box::new(move || {
-            if let Some(shutdown_tx) = shutdown_tx.take() {
-                log!("on_stop] firing shutdown_tx!");
-                if shutdown_tx.send(()).is_err() {
-                    log!("on_stop] Warning, shutdown_tx already closed")
-                }
-                Ok(())
-            } else {
-                ERR!("on_stop callback called twice!")
-            }
-        }));
-
-        let server = server
-            .http1_half_close(false)
-            .serve(make_svc)
-            .with_graceful_shutdown(shutdown_rx.then(|_| futures::future::ready(())));
-
-        let server = server.then(|r| {
-            if let Err(err) = r {
-                log!((err));
-            };
-            futures::future::ready(())
-        });
-
-        let rpc_ip_port = unwrap!(ctx.rpc_ip_port());
-        CORE.0.spawn({
-            log!(">>>>>>>>>> DEX stats " (rpc_ip_port.ip())":"(rpc_ip_port.port()) " \
-                DEX stats API enabled at unixtime." (gstuff::now_ms() / 1000) " <<<<<<<<<");
-            let _ = ctx.rpc_started.pin(true);
-            server
-        });
+    // CORE.0.enter(|| {
+    let server = unwrap!(Server::try_bind(&rpc_ip_port), "Can't bind on {}", rpc_ip_port);
+    let make_svc = make_service_fn(move |socket: &AddrStream| {
+        let remote_addr = socket.remote_addr();
+        async move {
+            Ok::<_, Infallible>(service_fn(move |req: Request<Body>| async move {
+                let res = rpc_service(req, ctx_h, remote_addr).await;
+                Ok::<_, Infallible>(res)
+            }))
+        }
     });
+
+    let (shutdown_tx, shutdown_rx) = futures::channel::oneshot::channel::<()>();
+    let mut shutdown_tx = Some(shutdown_tx);
+    ctx.on_stop(Box::new(move || {
+        if let Some(shutdown_tx) = shutdown_tx.take() {
+            log!("on_stop] firing shutdown_tx!");
+            if shutdown_tx.send(()).is_err() {
+                log!("on_stop] Warning, shutdown_tx already closed")
+            }
+            Ok(())
+        } else {
+            ERR!("on_stop callback called twice!")
+        }
+    }));
+
+    let server = server
+        .http1_half_close(false)
+        .serve(make_svc)
+        .with_graceful_shutdown(shutdown_rx.then(|_| futures::future::ready(())));
+
+    let server = server.then(|r| {
+        if let Err(err) = r {
+            log!((err));
+        };
+        futures::future::ready(())
+    });
+
+    let rpc_ip_port = unwrap!(ctx.rpc_ip_port());
+    tokio::spawn({
+        log!(">>>>>>>>>> DEX stats " (rpc_ip_port.ip())":"(rpc_ip_port.port()) " \
+                DEX stats API enabled at unixtime." (gstuff::now_ms() / 1000) " <<<<<<<<<");
+        let _ = ctx.rpc_started.pin(true);
+        server
+    });
+    //  });
 }
 
 #[cfg(not(feature = "native"))]
