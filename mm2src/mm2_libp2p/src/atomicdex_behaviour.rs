@@ -44,7 +44,7 @@ const ANNOUNCE_INITIAL_DELAY: Duration = Duration::from_secs(60);
 const CHANNEL_BUF_SIZE: usize = 1024 * 8;
 
 impl libp2p::core::Executor for &SwarmRuntime {
-    fn exec(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>) { self.0.spawn(future); }
+    fn exec(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>) { tokio::spawn(future); }
 }
 
 lazy_static! {
@@ -659,7 +659,7 @@ pub fn start_gossipsub(
         Poll::Pending
     });
 
-    SWARM_RUNTIME.0.spawn(polling_fut);
+    tokio::spawn(polling_fut);
 
     (cmd_tx, event_rx, local_peer_id)
 }

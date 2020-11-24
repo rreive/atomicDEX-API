@@ -1015,6 +1015,7 @@ pub mod lazy {
 
 #[cfg(feature = "native")]
 pub mod executor {
+    use crate::block_on;
     use futures::task::Context;
     use futures::task::Poll as Poll03;
     use futures::Future as Future03;
@@ -1063,7 +1064,7 @@ pub mod executor {
                             };
                             //log! ("spawn_after] spawning " (v.len()) " tasks at " [utc]);
                             for f in v {
-                                spawn(f)
+                                block_on(f)
                             }
                         }
                         let (utc, f) = match rx.recv_timeout(next_stop) {

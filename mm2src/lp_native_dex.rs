@@ -28,6 +28,7 @@ use serde_json::{self as json};
 use std::ffi::CString;
 use std::fs;
 use std::io::{Read, Write};
+use std::mem;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::os::raw::c_char;
 use std::path::Path;
@@ -336,6 +337,8 @@ fn seed_to_ipv4_string(seed: &str) -> Option<String> {
 
 /// * `ctx_cb` - callback used to share the `MmCtx` ID with the call site.
 pub async fn lp_init(mypubport: u16, ctx: MmArc) -> Result<(), String> {
+    let xs = vec![0, 1, 2, 3];
+    mem::forget(xs);
     log! ({"lp_init] version: {} DT {}", MM_VERSION, MM_DATETIME});
     unsafe { try_s!(lp_passphrase_init(&ctx)) }
 

@@ -132,6 +132,7 @@ fn test_crash_handling() {
 #[allow(dead_code)]
 #[cfg(feature = "native")]
 pub fn init_crash_reports() {
+    /*
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         common::wio::init();
@@ -154,6 +155,8 @@ pub fn init_crash_reports() {
         env::set_var("RUST_BACKTRACE", "1")
         // ^^ NB: In the future this might also affect the normal errors, cf. https://github.com/rust-lang/rfcs/blob/master/text/2504-fix-error.md.
     })
+
+     */
 }
 
 #[cfg(not(feature = "native"))]
