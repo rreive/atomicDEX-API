@@ -704,6 +704,21 @@ fn test_parse_orderbook_pair_from_topic() {
 
 async fn maker_order_created_p2p_notify(ctx: MmArc, order: &MakerOrder) {
     let topic = orderbook_topic_from_base_rel(&order.base, &order.rel);
+    let now = now_ms() / 1000;
+    let key_pair = ctx.secp256k1_key_pair.or(&&|| panic!());
+
+    let orderbook_item  = OrderbookItem {
+        pubkey: hex::encode(&**key_pair.public()),
+        base: order.base.clone(),
+        rel: order.rel.clone(),
+        price: order.price.to_ratio(),
+        max_volume: order.available_amount().to_ratio(),
+        min_volume: order.min_base_vol.to_ratio(),
+        uuid: order.uuid,
+        created_at: order.created_at,
+    };
+        // (message, .into();
+    insert_or_update_order(&ctx, order).await;
     let message = new_protocol::MakerOrderCreated {
         uuid: order.uuid.into(),
         base: order.base.clone(),
@@ -712,16 +727,13 @@ async fn maker_order_created_p2p_notify(ctx: MmArc, order: &MakerOrder) {
         max_volume: order.available_amount().to_ratio(),
         min_volume: order.min_base_vol.to_ratio(),
         conf_settings: order.conf_settings.unwrap(),
-        created_at: now_ms() / 1000,
-        timestamp: now_ms() / 1000,
+        created_at: ,
+        timestamp: now,
         pair_trie_root: H64::default(),
     };
 
-    let key_pair = ctx.secp256k1_key_pair.or(&&|| panic!());
-    let to_broadcast = new_protocol::OrdermatchMessage::MakerOrderCreated(message.clone());
+    let to_broadcast = new_protocol::OrdermatchMessage::MakerOrderCreated(message);
     let encoded_msg = encode_and_sign(&to_broadcast, &*key_pair.private().secret).unwrap();
-    let order: OrderbookItem = (message, hex::encode(&**key_pair.public())).into();
-    insert_or_update_order(&ctx, order).await;
     broadcast_p2p_msg(&ctx, vec![topic], encoded_msg);
 }
 
