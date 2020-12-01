@@ -1888,6 +1888,12 @@ fn pair_trie_root_by_pub(ctx: &MmArc, pubkey: &str, pair: &str) -> H64 {
         .unwrap()
 }
 
+fn pubkey_state(ctx: &MmArc, pubkey: &str) -> Option<OrderbookPubkeyState> {
+    let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+    let orderbook = block_on(ordermatch_ctx.orderbook.lock());
+    orderbook.pubkeys_state.get(pubkey).cloned()
+}
+
 fn clone_orderbook_memory_db(ctx: &MmArc) -> MemoryDB<Blake2Hasher64> {
     let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
     let orderbook = block_on(ordermatch_ctx.orderbook.lock());
@@ -2322,4 +2328,48 @@ fn test_remove_and_purge_pubkey_pair_orders() {
 
     remove_and_purge_pubkey_pair_orders(&mut orderbook, &pubkey, &rick_morty_pair);
     check_if_orderbook_contains_only(&orderbook, &pubkey, &rick_kmd_orders);
+}
+
+fn order_exists_in_orderbook(ctx: &MmArc, order: &OrderbookItem) -> bool {
+    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+    let orderbook = block_on(ordermatch_ctx.orderbook.lock());
+    let in_order_set = orderbook.order_set.contains_key(&order.uuid);
+    let in_unordered = orderbook
+        .unordered
+        .iter()
+        .find(|(_, uuids)| uuids.contains(&order.uuid))
+        .is_some();
+    let in_ordered = orderbook
+        .ordered
+        .iter()
+        .find(|(_, orders)| orders.iter().find(|ordered| ordered.uuid == order.uuid).is_some())
+        .is_some();
+
+    in_order_set || in_unordered || in_ordered
+}
+
+#[test]
+fn test_validate_timestamp_on_pubkey_keep_alive() {
+    let (ctx, pubkey, secret) = make_ctx_for_tests();
+    let orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 100);
+    for order in orders.clone() {
+        block_on(insert_or_update_order(&ctx, order));
+    }
+    let state = pubkey_state(&ctx, &pubkey).unwrap();
+    let msg = PubkeyKeepAlive {
+        trie_roots: state.trie_roots.clone(),
+        timestamp: std::u64::MAX,
+    };
+    block_on(process_orders_keep_alive(
+        ctx.clone(),
+        PeerId::random().to_string(),
+        pubkey.clone(),
+        msg,
+        false,
+    ));
+    // if timestamp is invalid pubkey state should be removed completely with all orders
+    assert!(pubkey_state(&ctx, &pubkey).is_none());
+    for order in orders {
+        assert!(!order_exists_in_orderbook(&ctx, &order));
+    }
 }

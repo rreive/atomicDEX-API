@@ -157,6 +157,13 @@ async fn process_orders_keep_alive(
     i_am_relay: bool,
 ) -> bool {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
+    let now = now_ms() / 1000;
+    if keep_alive.timestamp > now + ORDER_MATCH_TIMEOUT || keep_alive.timestamp < now - ORDER_MATCH_TIMEOUT {
+        let mut orderbook = ordermatch_ctx.orderbook.lock().await;
+        remove_and_purge_pubkey_state(&mut orderbook, &from_pubkey);
+        return false;
+    }
+
     let to_request = ordermatch_ctx
         .orderbook
         .lock()
@@ -323,6 +330,24 @@ fn remove_and_purge_pubkey_pair_orders(orderbook: &mut Orderbook, pubkey: &str, 
 
     if orderbook.memory_db.remove_and_purge(&pair_root, EMPTY_PREFIX).is_none() {
         log!("Warning: couldn't find "[pair_root]" hash root in memory_db");
+    }
+}
+
+/// Removes pubkey state and it's orders from orderbook
+fn remove_and_purge_pubkey_state(orderbook: &mut Orderbook, pubkey: &str) {
+    let pubkey_state = match orderbook.pubkeys_state.remove(pubkey) {
+        Some(state) => state,
+        None => return,
+    };
+
+    for (_, pair_root) in pubkey_state.trie_roots {
+        if orderbook.memory_db.remove_and_purge(&pair_root, EMPTY_PREFIX).is_none() {
+            log!("Warning: couldn't find "[pair_root]" hash root in memory_db");
+        }
+    }
+
+    for (uuid, _) in pubkey_state.orders_uuids {
+        orderbook.remove_order(uuid);
     }
 }
 
@@ -1622,13 +1647,13 @@ enum OrderbookRequestingState {
 
 type H64 = [u8; 8];
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TrieDiff<Key, Value> {
     delta: Vec<(Key, Option<Value>)>,
     next_root: H64,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TrieDiffHistory<Key, Value> {
     inner: HashMap<H64, TrieDiff<Key, Value>>,
 }
@@ -1672,7 +1697,7 @@ impl<Key, Value> TrieDiffHistory<Key, Value> {
 
 type TrieOrderHistory = TrieDiffHistory<Uuid, OrderbookItem>;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct OrderbookPubkeyState {
     /// Timestamp of the latest keep alive message received
     last_keep_alive: u64,
