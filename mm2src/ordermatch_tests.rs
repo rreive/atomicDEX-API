@@ -2360,16 +2360,12 @@ fn test_validate_timestamp_on_pubkey_keep_alive() {
         trie_roots: state.trie_roots.clone(),
         timestamp: std::u64::MAX,
     };
-    block_on(process_orders_keep_alive(
+    let result = block_on(process_orders_keep_alive(
         ctx.clone(),
         PeerId::random().to_string(),
         pubkey.clone(),
         msg,
         false,
     ));
-    // if timestamp is invalid pubkey state should be removed completely with all orders
-    assert!(pubkey_state(&ctx, &pubkey).is_none());
-    for order in orders {
-        assert!(!order_exists_in_orderbook(&ctx, &order));
-    }
+    assert!(!result);
 }

@@ -128,10 +128,12 @@ fn process_trie_delta(
     pubkey: &str,
     alb_pair: &str,
     delta_orders: HashMap<Uuid, Option<OrderbookItem>>,
-) -> H64 {
+) -> Result<H64, String> {
     for (uuid, order) in delta_orders {
         match order {
-            Some(order) => orderbook.insert_or_update_order_update_trie(order),
+            Some(order) => {
+                try_s!(orderbook.insert_or_update_order_update_trie(order));
+            },
             None => {
                 orderbook.remove_order_trie_update(uuid);
             },
@@ -146,7 +148,7 @@ fn process_trie_delta(
             .unwrap_or_else(H64::default),
         None => H64::default(),
     };
-    new_root
+    Ok(new_root)
 }
 
 async fn process_orders_keep_alive(
@@ -159,8 +161,7 @@ async fn process_orders_keep_alive(
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let now = now_ms() / 1000;
     if keep_alive.timestamp > now + ORDER_MATCH_TIMEOUT || keep_alive.timestamp < now - ORDER_MATCH_TIMEOUT {
-        let mut orderbook = ordermatch_ctx.orderbook.lock().await;
-        remove_and_purge_pubkey_state(&mut orderbook, &from_pubkey);
+        // ignore the message with invalid timestamp
         return false;
     }
 
@@ -188,7 +189,10 @@ async fn process_orders_keep_alive(
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
     for (pair, diff) in response.pair_orders_diff {
         let _new_root = match diff {
-            DeltaOrFullTrie::Delta(delta) => process_trie_delta(&mut orderbook, &from_pubkey, &pair, delta),
+            DeltaOrFullTrie::Delta(delta) => match process_trie_delta(&mut orderbook, &from_pubkey, &pair, delta) {
+                Ok(r) => r,
+                Err(_) => return false,
+            },
             DeltaOrFullTrie::FullTrie(values) => process_pubkey_full_trie(&mut orderbook, &from_pubkey, &pair, values),
         };
     }
@@ -199,6 +203,7 @@ async fn process_maker_order_updated(
     ctx: MmArc,
     from_pubkey: String,
     updated_msg: new_protocol::MakerOrderUpdated,
+    signed_payload: &[u8],
 ) -> bool {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let uuid = updated_msg.uuid();
@@ -206,8 +211,16 @@ async fn process_maker_order_updated(
     match orderbook.find_order_by_uuid_and_pubkey(&uuid, &from_pubkey) {
         Some(mut order) => {
             order.apply_updated(&updated_msg);
-            orderbook.insert_or_update_order_update_trie(order);
-            true
+            let pair = alb_ordered_pair(&order.base, &order.rel);
+            match orderbook.insert_or_update_order_update_trie(order) {
+                Ok(_) => {
+                    pubkey_state_mut(&mut orderbook.pubkeys_state, &from_pubkey)
+                        .last_signed_payloads
+                        .insert(pair, signed_payload.to_vec());
+                    true
+                },
+                Err(_) => false,
+            }
         },
         None => {
             log!("Couldn't find an order " [uuid] ", ignoring, it will be synced upon pubkey keep alive");
@@ -267,7 +280,7 @@ async fn request_and_fill_orderbook(ctx: &MmArc, base: &str, rel: &str) -> Resul
 
 /// Insert or update an order `req`.
 /// Note this function locks the [`OrdermatchContext::orderbook`] async mutex.
-async fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) {
+async fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) -> Result<H64, String> {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
     orderbook.insert_or_update_order_update_trie(item)
@@ -351,14 +364,28 @@ fn remove_and_purge_pubkey_state(orderbook: &mut Orderbook, pubkey: &str) {
     }
 }
 
+async fn update_last_signed_payload(ctx: &MmArc, pubkey: &str, pair: AlbOrderedOrderbookPair, msg: Vec<u8>) {
+    let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).expect("from_ctx failed");
+    let mut orderbook = ordermatch_ctx.orderbook.lock().await;
+    pubkey_state_mut(&mut orderbook.pubkeys_state, pubkey)
+        .last_signed_payloads
+        .insert(pair, msg);
+}
+
 /// Attempts to decode a message and process it returning whether the message is valid and worth rebroadcasting
 pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, msg: &[u8], i_am_relay: bool) -> bool {
     match decode_signed::<new_protocol::OrdermatchMessage>(msg) {
         Ok((message, _sig, pubkey)) => match message {
             new_protocol::OrdermatchMessage::MakerOrderCreated(created_msg) => {
-                let order: OrderbookItem = (created_msg, hex::encode(pubkey.to_bytes().as_slice())).into();
-                insert_or_update_order(&ctx, order).await;
-                true
+                let order: OrderbookItem = (created_msg, pubkey.to_hex()).into();
+                let alb_ordered = alb_ordered_pair(&order.base, &order.rel);
+                match insert_or_update_order(&ctx, order).await {
+                    Ok(_) => {
+                        update_last_signed_payload(&ctx, &pubkey.to_hex(), alb_ordered, msg.to_owned()).await;
+                        true
+                    },
+                    Err(_) => false,
+                }
             },
             new_protocol::OrdermatchMessage::PubkeyKeepAlive(keep_alive) => {
                 process_orders_keep_alive(ctx, from_peer, pubkey.to_hex(), keep_alive, i_am_relay).await
@@ -386,7 +413,7 @@ pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, ms
                 true
             },
             new_protocol::OrdermatchMessage::MakerOrderUpdated(updated_msg) => {
-                process_maker_order_updated(ctx, pubkey.to_hex(), updated_msg).await
+                process_maker_order_updated(ctx, pubkey.to_hex(), updated_msg, msg).await
             },
         },
         Err(e) => {
@@ -610,6 +637,8 @@ struct SyncPubkeyOrderbookStateRes {
     /// last signed OrdermatchMessage payload from pubkey
     last_signed_pubkey_payload: Vec<u8>,
     pair_orders_diff: HashMap<AlbOrderedOrderbookPair, DeltaOrFullTrie<Uuid, OrderbookItem>>,
+    // TODO make it mandatory when nodes are updated
+    last_signed_pubkey_payloads: Option<HashMap<AlbOrderedOrderbookPair, Vec<u8>>>,
 }
 
 async fn process_sync_pubkey_orderbook_state(
@@ -647,6 +676,7 @@ async fn process_sync_pubkey_orderbook_state(
     let result = SyncPubkeyOrderbookStateRes {
         last_signed_pubkey_payload,
         pair_orders_diff,
+        last_signed_pubkey_payloads: None,
     };
     Ok(Some(result))
 }
@@ -706,9 +736,10 @@ async fn maker_order_created_p2p_notify(ctx: MmArc, order: &MakerOrder) {
     let topic = orderbook_topic_from_base_rel(&order.base, &order.rel);
     let now = now_ms() / 1000;
     let key_pair = ctx.secp256k1_key_pair.or(&&|| panic!());
+    let my_pubkey = hex::encode(&**key_pair.public());
 
-    let orderbook_item  = OrderbookItem {
-        pubkey: hex::encode(&**key_pair.public()),
+    let orderbook_item = OrderbookItem {
+        pubkey: my_pubkey,
         base: order.base.clone(),
         rel: order.rel.clone(),
         price: order.price.to_ratio(),
@@ -717,8 +748,15 @@ async fn maker_order_created_p2p_notify(ctx: MmArc, order: &MakerOrder) {
         uuid: order.uuid,
         created_at: order.created_at,
     };
-        // (message, .into();
-    insert_or_update_order(&ctx, order).await;
+
+    // TODO: move this step on top level and return RPC error
+    let pair_trie_root = match insert_or_update_order(&ctx, orderbook_item).await {
+        Ok(r) => r,
+        Err(e) => {
+            log!("Error " (e) " on order insertion");
+            return;
+        },
+    };
     let message = new_protocol::MakerOrderCreated {
         uuid: order.uuid.into(),
         base: order.base.clone(),
@@ -727,9 +765,9 @@ async fn maker_order_created_p2p_notify(ctx: MmArc, order: &MakerOrder) {
         max_volume: order.available_amount().to_ratio(),
         min_volume: order.min_base_vol.to_ratio(),
         conf_settings: order.conf_settings.unwrap(),
-        created_at: ,
+        created_at: order.created_at,
         timestamp: now,
-        pair_trie_root: H64::default(),
+        pair_trie_root,
     };
 
     let to_broadcast = new_protocol::OrdermatchMessage::MakerOrderCreated(message);
@@ -1720,6 +1758,8 @@ struct OrderbookPubkeyState {
     orders_uuids: HashSet<(Uuid, AlbOrderedOrderbookPair)>,
     /// The map storing alphabetically ordered pair with trie root hash of orders owned by pubkey.
     trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
+    /// The map storing last signed payload of a message for alphabetically ordered pair.
+    last_signed_payloads: HashMap<AlbOrderedOrderbookPair, Vec<u8>>,
 }
 
 fn get_trie_mut<'a>(
@@ -1826,11 +1866,12 @@ impl Orderbook {
 
     fn find_order_by_uuid(&self, uuid: &Uuid) -> Option<OrderbookItem> { self.order_set.get(uuid).cloned() }
 
-    fn insert_or_update_order_update_trie(&mut self, order: OrderbookItem) {
+    /// Inserts OrderbookItem and returns the updated pair trie root if operation was successful
+    fn insert_or_update_order_update_trie(&mut self, order: OrderbookItem) -> Result<H64, String> {
         let zero = BigRational::from_integer(0.into());
         if order.max_volume <= zero || order.price <= zero || order.min_volume < zero {
             self.remove_order_trie_update(order.uuid);
-            return;
+            return ERR!("Invalid OrderbookItem");
         } // else insert the order
 
         self.insert_or_update_order(order.clone());
@@ -1843,18 +1884,9 @@ impl Orderbook {
 
         pubkey_state.orders_uuids.insert((order.uuid, alb_ordered.clone()));
 
-        let mut pair_trie = match get_trie_mut(&mut self.memory_db, pair_root) {
-            Ok(trie) => trie,
-            Err(e) => {
-                log!("Error getting "(e)" trie with root "[prev_root]);
-                return;
-            },
-        };
+        let mut pair_trie = try_s!(get_trie_mut(&mut self.memory_db, pair_root));
         let order_bytes = rmp_serde::to_vec(&order).expect("Serialization should never fail");
-        if let Err(e) = pair_trie.insert(order.uuid.as_bytes(), &order_bytes) {
-            log!("Error " (e) " on insertion to trie. Key " (order.uuid) ", value " [order_bytes]);
-            return;
-        };
+        try_s!(pair_trie.insert(order.uuid.as_bytes(), &order_bytes));
         drop(pair_trie);
 
         if prev_root != H64::default() {
@@ -1864,6 +1896,7 @@ impl Orderbook {
                 next_root: *pair_root,
             });
         }
+        Ok(*pair_root)
     }
 
     fn insert_or_update_order(&mut self, order: OrderbookItem) {
