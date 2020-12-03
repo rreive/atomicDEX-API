@@ -1955,10 +1955,10 @@ impl Orderbook {
         Some(order)
     }
 
-    fn remove_order_trie_update(&mut self, uuid: Uuid) -> Option<OrderbookItem> {
+    fn remove_order_trie_update(&mut self, uuid: Uuid) -> Result<H64, String> {
         let order = match self.order_set.remove(&uuid) {
             Some(order) => order,
-            None => return None,
+            None => return ERR!("Order with uuid {} is not found in order_set", uuid),
         };
         let base_rel = (order.base.clone(), order.rel.clone());
 
@@ -1991,23 +1991,18 @@ impl Orderbook {
         let to_remove = &(uuid, alb_ordered.clone());
         pubkey_state.orders_uuids.remove(to_remove);
 
-        *pair_state = match delta_trie_root::<Layout, _, _, _, _, _>(&mut self.memory_db, *pair_state, vec![(
-            *order.uuid.as_bytes(),
-            None::<Vec<u8>>,
-        )]) {
-            Ok(root) => root,
-            Err(_) => {
-                log!("Failed to get existing trie with root "[pair_state]);
-                return Some(order);
-            },
-        };
+        *pair_state = try_s!(delta_trie_root::<Layout, _, _, _, _, _>(
+            &mut self.memory_db,
+            *pair_state,
+            vec![(*order.uuid.as_bytes(), None::<Vec<u8>>,)]
+        ));
 
         let history = pair_history_mut(&mut pubkey_state.order_pairs_trie_state_history, &alb_ordered);
         history.insert_new_diff(old_state, TrieDiff {
             delta: vec![(uuid, None)],
             next_root: *pair_state,
         });
-        Some(order)
+        Ok(*pair_state)
     }
 
     fn is_subscribed_to(&self, topic: &str) -> bool { self.topics_subscribed_to.contains_key(topic) }
