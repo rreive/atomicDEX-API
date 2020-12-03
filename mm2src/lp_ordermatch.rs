@@ -112,7 +112,7 @@ fn process_pubkey_full_trie(
     remove_and_purge_pubkey_pair_orders(orderbook, pubkey, alb_pair);
 
     for (_uuid, order) in new_trie_orders {
-        orderbook.insert_or_update_order_update_trie(order);
+        orderbook.insert_or_update_order_update_trie(order).unwrap();
     }
 
     let new_root = pubkey_state_mut(&mut orderbook.pubkeys_state, pubkey)
@@ -135,7 +135,7 @@ fn process_trie_delta(
                 try_s!(orderbook.insert_or_update_order_update_trie(order));
             },
             None => {
-                orderbook.remove_order_trie_update(uuid);
+                try_s!(orderbook.remove_order_trie_update(uuid));
             },
         }
     }
@@ -304,7 +304,7 @@ async fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) {
         // don't remove the order if the pubkey is not equal
         Some(order) if order.pubkey != pubkey => (),
         Some(_) => {
-            orderbook.remove_order_trie_update(uuid);
+            orderbook.remove_order_trie_update(uuid).unwrap();
         },
         None => (),
     }
@@ -313,7 +313,7 @@ async fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) {
 async fn delete_my_order(ctx: &MmArc, uuid: Uuid) {
     let ordermatch_ctx: Arc<OrdermatchContext> = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
-    orderbook.remove_order_trie_update(uuid);
+    orderbook.remove_order_trie_update(uuid).unwrap();
 }
 
 fn remove_and_purge_pubkey_pair_orders(orderbook: &mut Orderbook, pubkey: &str, alb_pair: &str) {
@@ -782,7 +782,7 @@ async fn process_my_maker_order_updated(ctx: &MmArc, message: &new_protocol::Mak
     let uuid = message.uuid();
     if let Some(mut order) = orderbook.find_order_by_uuid(&uuid) {
         order.apply_updated(message);
-        orderbook.insert_or_update_order_update_trie(order);
+        orderbook.insert_or_update_order_update_trie(order).unwrap();
     }
 }
 
@@ -1870,7 +1870,7 @@ impl Orderbook {
     fn insert_or_update_order_update_trie(&mut self, order: OrderbookItem) -> Result<H64, String> {
         let zero = BigRational::from_integer(0.into());
         if order.max_volume <= zero || order.price <= zero || order.min_volume < zero {
-            self.remove_order_trie_update(order.uuid);
+            try_s!(self.remove_order_trie_update(order.uuid));
             return ERR!("Invalid OrderbookItem");
         } // else insert the order
 
@@ -1903,7 +1903,9 @@ impl Orderbook {
         log!("Inserting order "[order]);
         let zero = BigRational::from_integer(0.into());
         if order.max_volume <= zero || order.price <= zero || order.min_volume < zero {
-            self.remove_order_trie_update(order.uuid);
+            if let Err(e) = self.remove_order_trie_update(order.uuid) {
+                log!("Error " (e) " on order " (order.uuid) " removal.");
+            }
             return;
         } // else insert the order
 

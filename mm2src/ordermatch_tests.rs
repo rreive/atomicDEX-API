@@ -690,42 +690,62 @@ fn prepare_for_cancel_by(ctx: &MmArc) -> mpsc::Receiver<AdexBehaviourCmd> {
     let mut maker_orders = block_on(ordermatch_ctx.my_maker_orders.lock());
     let mut taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
 
-    maker_orders.insert(Uuid::from_bytes([0; 16]), MakerOrder {
-        uuid: Uuid::from_bytes([0; 16]),
-        base: "RICK".into(),
-        rel: "MORTY".into(),
-        created_at: now_ms(),
-        matches: HashMap::new(),
-        max_base_vol: 0.into(),
-        min_base_vol: 0.into(),
-        price: 0.into(),
-        started_swaps: vec![],
-        conf_settings: None,
-    });
-    maker_orders.insert(Uuid::from_bytes([1; 16]), MakerOrder {
-        uuid: Uuid::from_bytes([1; 16]),
-        base: "MORTY".into(),
-        rel: "RICK".into(),
-        created_at: now_ms(),
-        matches: HashMap::new(),
-        max_base_vol: 0.into(),
-        min_base_vol: 0.into(),
-        price: 0.into(),
-        started_swaps: vec![],
-        conf_settings: None,
-    });
-    maker_orders.insert(Uuid::from_bytes([2; 16]), MakerOrder {
-        uuid: Uuid::from_bytes([2; 16]),
-        base: "MORTY".into(),
-        rel: "ETH".into(),
-        created_at: now_ms(),
-        matches: HashMap::new(),
-        max_base_vol: 0.into(),
-        min_base_vol: 0.into(),
-        price: 0.into(),
-        started_swaps: vec![],
-        conf_settings: None,
-    });
+    let maker_orders_to_insert = vec![
+        MakerOrder {
+            uuid: Uuid::from_bytes([0; 16]),
+            base: "RICK".into(),
+            rel: "MORTY".into(),
+            created_at: now_ms(),
+            matches: HashMap::new(),
+            max_base_vol: 1.into(),
+            min_base_vol: 0.into(),
+            price: 1.into(),
+            started_swaps: vec![],
+            conf_settings: None,
+        },
+        MakerOrder {
+            uuid: Uuid::from_bytes([1; 16]),
+            base: "MORTY".into(),
+            rel: "RICK".into(),
+            created_at: now_ms(),
+            matches: HashMap::new(),
+            max_base_vol: 1.into(),
+            min_base_vol: 0.into(),
+            price: 1.into(),
+            started_swaps: vec![],
+            conf_settings: None,
+        },
+        MakerOrder {
+            uuid: Uuid::from_bytes([2; 16]),
+            base: "MORTY".into(),
+            rel: "ETH".into(),
+            created_at: now_ms(),
+            matches: HashMap::new(),
+            max_base_vol: 1.into(),
+            min_base_vol: 0.into(),
+            price: 1.into(),
+            started_swaps: vec![],
+            conf_settings: None,
+        },
+    ];
+
+    let key_pair = ctx.secp256k1_key_pair.or(&&|| panic!());
+    let my_pubkey = hex::encode(&**key_pair.public());
+    for order in maker_orders_to_insert {
+        let orderbook_item = OrderbookItem {
+            pubkey: my_pubkey.clone(),
+            base: order.base.clone(),
+            rel: order.rel.clone(),
+            price: order.price.to_ratio(),
+            max_volume: order.available_amount().to_ratio(),
+            min_volume: order.min_base_vol.to_ratio(),
+            uuid: order.uuid,
+            created_at: order.created_at,
+        };
+
+        let pair_trie_root = block_on(insert_or_update_order(&ctx, orderbook_item)).unwrap();
+        maker_orders.insert(order.uuid, order);
+    }
     taker_orders.insert(Uuid::from_bytes([3; 16]), TakerOrder {
         matches: HashMap::new(),
         created_at: now_ms(),
@@ -1361,7 +1381,7 @@ fn test_process_get_orderbook_request() {
     let mut orderbook = block_on(ordermatch_ctx.orderbook.lock());
 
     for order in orders_by_pubkeys.iter().map(|(_pubkey, orders)| orders).flatten() {
-        orderbook.insert_or_update_order_update_trie(order.clone());
+        orderbook.insert_or_update_order_update_trie(order.clone()).unwrap();
     }
 
     // avoid dead lock on orderbook as process_get_orderbook_request also acquires it
@@ -1407,7 +1427,7 @@ fn test_process_get_orderbook_request_limit() {
     );
 
     for order in orders {
-        orderbook.insert_or_update_order_update_trie(order);
+        orderbook.insert_or_update_order_update_trie(order).unwrap();
     }
 
     // avoid dead lock on orderbook as process_get_orderbook_request also acquires it
@@ -1455,7 +1475,7 @@ fn test_request_and_fill_orderbook() {
     {
         let (pubkey, secret) = &other_pubkeys[0];
         for extra_order in make_random_orders(pubkey.clone(), secret, "RICK".into(), "MORTY".into(), 2) {
-            block_on(insert_or_update_order(&ctx, extra_order));
+            block_on(insert_or_update_order(&ctx, extra_order)).unwrap();
         }
     }
 
@@ -1873,7 +1893,7 @@ fn test_orderbook_insert_or_update_order() {
     let (_, pubkey, secret) = make_ctx_for_tests();
     let mut orderbook = Orderbook::default();
     let order = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 1).remove(0);
-    orderbook.insert_or_update_order_update_trie(order.clone());
+    orderbook.insert_or_update_order_update_trie(order.clone()).unwrap();
 }
 
 fn pair_trie_root_by_pub(ctx: &MmArc, pubkey: &str, pair: &str) -> H64 {
@@ -1912,7 +1932,7 @@ fn test_process_sync_pubkey_orderbook_state_after_new_orders_added() {
     let orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 100);
 
     for order in orders {
-        block_on(insert_or_update_order(&ctx, order));
+        block_on(insert_or_update_order(&ctx, order)).unwrap();
     }
 
     let alb_ordered_pair = alb_ordered_pair("C1", "C2");
@@ -1924,7 +1944,7 @@ fn test_process_sync_pubkey_orderbook_state_after_new_orders_added() {
 
     let new_orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 100);
     for order in new_orders {
-        block_on(insert_or_update_order(&ctx, order.clone()));
+        block_on(insert_or_update_order(&ctx, order.clone())).unwrap();
     }
 
     let mut result = block_on(process_sync_pubkey_orderbook_state(
@@ -1960,13 +1980,13 @@ fn test_diff_should_not_be_written_if_hash_not_changed_on_insert() {
     let orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 100);
 
     for order in orders.clone() {
-        block_on(insert_or_update_order(&ctx, order));
+        block_on(insert_or_update_order(&ctx, order)).unwrap();
     }
 
     let alb_ordered_pair = alb_ordered_pair("C1", "C2");
     let pair_trie_root = pair_trie_root_by_pub(&ctx, &pubkey, &alb_ordered_pair);
     for order in orders.clone() {
-        block_on(insert_or_update_order(&ctx, order));
+        block_on(insert_or_update_order(&ctx, order)).unwrap();
     }
 
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
@@ -1985,7 +2005,7 @@ fn test_process_sync_pubkey_orderbook_state_after_orders_removed() {
     let orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 100);
 
     for order in orders.clone() {
-        block_on(insert_or_update_order(&ctx, order));
+        block_on(insert_or_update_order(&ctx, order)).unwrap();
     }
 
     let alb_ordered_pair = alb_ordered_pair("C1", "C2");
@@ -2035,7 +2055,7 @@ fn test_diff_should_not_be_written_if_hash_not_changed_on_remove() {
     let orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 100);
 
     for order in orders.clone() {
-        block_on(insert_or_update_order(&ctx, order));
+        block_on(insert_or_update_order(&ctx, order)).unwrap();
     }
 
     let to_remove: Vec<_> = orders
@@ -2171,7 +2191,7 @@ fn test_process_sync_pubkey_orderbook_state_points_to_not_uptodate_trie_root() {
         .expect("Expected one order");
 
     for order in orders.iter() {
-        block_on(insert_or_update_order(&ctx, order.clone()));
+        block_on(insert_or_update_order(&ctx, order.clone())).unwrap();
     }
 
     let alb_pair = alb_ordered_pair("RICK", "MORTY");
@@ -2317,7 +2337,7 @@ fn test_remove_and_purge_pubkey_pair_orders() {
     let rick_kmd_orders = make_random_orders(pubkey.clone(), &secret, "RICK".into(), "KMD".into(), 10);
 
     for order in rick_morty_orders.iter().chain(rick_kmd_orders.iter()) {
-        block_on(insert_or_update_order(&ctx, order.clone()));
+        block_on(insert_or_update_order(&ctx, order.clone())).unwrap();
     }
 
     let rick_morty_pair = alb_ordered_pair("RICK", "MORTY");
@@ -2353,7 +2373,7 @@ fn test_validate_timestamp_on_pubkey_keep_alive() {
     let (ctx, pubkey, secret) = make_ctx_for_tests();
     let orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 100);
     for order in orders.clone() {
-        block_on(insert_or_update_order(&ctx, order));
+        block_on(insert_or_update_order(&ctx, order)).unwrap();
     }
     let state = pubkey_state(&ctx, &pubkey).unwrap();
     let msg = PubkeyKeepAlive {
