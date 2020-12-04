@@ -286,34 +286,21 @@ async fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) -> Result<H64,
     orderbook.insert_or_update_order_update_trie(item)
 }
 
-async fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) {
+async fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) -> Result<H64, String> {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
-
-    let mut inactive = ordermatch_ctx.inactive_orders.lock().await;
-    match inactive.get(&uuid) {
-        // don't remove the order if the pubkey is not equal
-        Some(order) if order.pubkey != pubkey => (),
-        Some(_) => {
-            inactive.remove(&uuid);
-        },
-        None => (),
-    }
-
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
     match orderbook.order_set.get(&uuid) {
         // don't remove the order if the pubkey is not equal
-        Some(order) if order.pubkey != pubkey => (),
-        Some(_) => {
-            orderbook.remove_order_trie_update(uuid).unwrap();
-        },
-        None => (),
+        Some(order) if order.pubkey != pubkey => ERR!("Input pubkey {} != order.pubkey {}", pubkey, order.pubkey),
+        Some(_) => orderbook.remove_order_trie_update(uuid),
+        None => ERR!("Order {} is not found", uuid),
     }
 }
 
-async fn delete_my_order(ctx: &MmArc, uuid: Uuid) {
+async fn delete_my_order(ctx: &MmArc, uuid: Uuid) -> Result<H64, String> {
     let ordermatch_ctx: Arc<OrdermatchContext> = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
-    orderbook.remove_order_trie_update(uuid).unwrap();
+    orderbook.remove_order_trie_update(uuid)
 }
 
 fn remove_and_purge_pubkey_pair_orders(orderbook: &mut Orderbook, pubkey: &str, alb_pair: &str) {
@@ -409,8 +396,13 @@ pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, ms
                 true
             },
             new_protocol::OrdermatchMessage::MakerOrderCancelled(cancelled_msg) => {
-                delete_order(&ctx, &pubkey.to_hex(), cancelled_msg.uuid.into()).await;
-                true
+                match delete_order(&ctx, &pubkey.to_hex(), cancelled_msg.uuid.into()).await {
+                    Ok(_) => {
+                        update_last_signed_payload(&ctx, &pubkey.to_hex(), alb_ordered, msg.to_owned()).await;
+                        true
+                    },
+                    Err(_) => false,
+                }
             },
             new_protocol::OrdermatchMessage::MakerOrderUpdated(updated_msg) => {
                 process_maker_order_updated(ctx, pubkey.to_hex(), updated_msg, msg).await
@@ -796,12 +788,18 @@ async fn maker_order_updated_p2p_notify(ctx: MmArc, base: &str, rel: &str, messa
 }
 
 async fn maker_order_cancelled_p2p_notify(ctx: MmArc, order: &MakerOrder) {
+    let pair_trie_root = match delete_my_order(&ctx, order.uuid).await {
+        Ok(r) => r,
+        Err(e) => {
+            log!("Error " (e) " on delete_my_order");
+            return;
+        },
+    };
     let message = new_protocol::OrdermatchMessage::MakerOrderCancelled(new_protocol::MakerOrderCancelled {
         uuid: order.uuid.into(),
         timestamp: now_ms() / 1000,
-        pair_trie_root: H64::default(),
+        pair_trie_root,
     });
-    delete_my_order(&ctx, order.uuid).await;
     log!("maker_order_cancelled_p2p_notify called, message "[message]);
     broadcast_ordermatch_message(
         &ctx,
@@ -2051,7 +2049,6 @@ struct OrdermatchContext {
     pub my_cancelled_orders: AsyncMutex<HashMap<Uuid, MakerOrder>>,
     pub orderbook: AsyncMutex<Orderbook>,
     pub order_requests_tracker: AsyncMutex<OrderRequestsTracker>,
-    pub inactive_orders: AsyncMutex<HashMap<Uuid, OrderbookItem>>,
 }
 
 #[cfg_attr(test, mockable)]
