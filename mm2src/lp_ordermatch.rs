@@ -286,7 +286,7 @@ async fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) -> Result<H64,
     orderbook.insert_or_update_order_update_trie(item)
 }
 
-async fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) -> Result<H64, String> {
+async fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) -> Result<(OrderbookItem, H64), String> {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
     match orderbook.order_set.get(&uuid) {
@@ -297,7 +297,7 @@ async fn delete_order(ctx: &MmArc, pubkey: &str, uuid: Uuid) -> Result<H64, Stri
     }
 }
 
-async fn delete_my_order(ctx: &MmArc, uuid: Uuid) -> Result<H64, String> {
+async fn delete_my_order(ctx: &MmArc, uuid: Uuid) -> Result<(OrderbookItem, H64), String> {
     let ordermatch_ctx: Arc<OrdermatchContext> = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
     orderbook.remove_order_trie_update(uuid)
@@ -397,7 +397,8 @@ pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, ms
             },
             new_protocol::OrdermatchMessage::MakerOrderCancelled(cancelled_msg) => {
                 match delete_order(&ctx, &pubkey.to_hex(), cancelled_msg.uuid.into()).await {
-                    Ok(_) => {
+                    Ok((order, _)) => {
+                        let alb_ordered = alb_ordered_pair(&order.base, &order.rel);
                         update_last_signed_payload(&ctx, &pubkey.to_hex(), alb_ordered, msg.to_owned()).await;
                         true
                     },
@@ -767,28 +768,38 @@ async fn maker_order_created_p2p_notify(ctx: MmArc, order: &MakerOrder) {
     broadcast_p2p_msg(&ctx, vec![topic], encoded_msg);
 }
 
-async fn process_my_maker_order_updated(ctx: &MmArc, message: &new_protocol::MakerOrderUpdated, serialized: Vec<u8>) {
+async fn process_my_maker_order_updated(ctx: &MmArc, message: &new_protocol::MakerOrderUpdated) -> Result<H64, String> {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
 
     let uuid = message.uuid();
-    if let Some(mut order) = orderbook.find_order_by_uuid(&uuid) {
-        order.apply_updated(message);
-        orderbook.insert_or_update_order_update_trie(order).unwrap();
+    match orderbook.find_order_by_uuid(&uuid) {
+        Some(mut order) => {
+            order.apply_updated(message);
+            orderbook.insert_or_update_order_update_trie(order)
+        },
+        None => ERR!("Order {} is not found", uuid),
     }
 }
 
 async fn maker_order_updated_p2p_notify(ctx: MmArc, base: &str, rel: &str, message: new_protocol::MakerOrderUpdated) {
-    let msg: new_protocol::OrdermatchMessage = message.clone().into();
+    let new_pair_root = match process_my_maker_order_updated(&ctx, &message).await {
+        Ok(r) => r,
+        Err(e) => {
+            log!("Error "(e)" on process_my_maker_order_updated");
+            return;
+        },
+    };
+    let message = message.with_pair_trie_root(new_pair_root);
+    let msg: new_protocol::OrdermatchMessage = message.into();
     let topic = orderbook_topic_from_base_rel(base, rel);
     let key_pair = ctx.secp256k1_key_pair.or(&&|| panic!());
     let encoded_msg = encode_and_sign(&msg, &*key_pair.private().secret).unwrap();
-    process_my_maker_order_updated(&ctx, &message, encoded_msg.clone()).await;
     broadcast_p2p_msg(&ctx, vec![topic], encoded_msg);
 }
 
 async fn maker_order_cancelled_p2p_notify(ctx: MmArc, order: &MakerOrder) {
-    let pair_trie_root = match delete_my_order(&ctx, order.uuid).await {
+    let (_, pair_trie_root) = match delete_my_order(&ctx, order.uuid).await {
         Ok(r) => r,
         Err(e) => {
             log!("Error " (e) " on delete_my_order");
@@ -1955,7 +1966,7 @@ impl Orderbook {
         Some(order)
     }
 
-    fn remove_order_trie_update(&mut self, uuid: Uuid) -> Result<H64, String> {
+    fn remove_order_trie_update(&mut self, uuid: Uuid) -> Result<(OrderbookItem, H64), String> {
         let order = match self.order_set.remove(&uuid) {
             Some(order) => order,
             None => return ERR!("Order with uuid {} is not found in order_set", uuid),
@@ -2002,7 +2013,7 @@ impl Orderbook {
             delta: vec![(uuid, None)],
             next_root: *pair_state,
         });
-        Ok(*pair_state)
+        Ok((order, *pair_state))
     }
 
     fn is_subscribed_to(&self, topic: &str) -> bool { self.topics_subscribed_to.contains_key(topic) }

@@ -176,6 +176,11 @@ impl MakerOrderUpdated {
         self
     }
 
+    pub fn with_pair_trie_root(mut self, pair_trie_root: H64) -> Self {
+        self.pair_trie_root = pair_trie_root;
+        self
+    }
+
     pub fn new_price(&self) -> Option<MmNumber> { self.new_price.as_ref().map(|num| num.clone().into()) }
 
     pub fn new_max_volume(&self) -> Option<MmNumber> { self.new_max_volume.as_ref().map(|num| num.clone().into()) }
