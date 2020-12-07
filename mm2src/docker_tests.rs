@@ -2150,4 +2150,108 @@ mod docker_tests {
         unwrap!(block_on(mm_bob.stop()));
         unwrap!(block_on(mm_alice.stop()));
     }
+
+    #[test]
+    fn alice_can_see_the_active_order_after_connection() {
+        let (_ctx, _, bob_priv_key) = generate_coin_with_random_privkey("MYCOIN", 1000.into());
+        let (_ctx, _, alice_priv_key) = generate_coin_with_random_privkey("MYCOIN1", 2000.into());
+        let coins = json! ([
+            {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
+            {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
+        ]);
+
+        // start bob and immediately place the order
+        let mut mm_bob = unwrap!(MarketMakerIt::start(
+            json! ({
+                "gui": "nogui",
+                "netid": 9998,
+                "myipaddr": env::var ("BOB_TRADE_IP") .ok(),
+                "rpcip": env::var ("BOB_TRADE_IP") .ok(),
+                "canbind": env::var ("BOB_TRADE_PORT") .ok().map (|s| unwrap! (s.parse::<i64>())),
+                "passphrase": format!("0x{}", hex::encode(bob_priv_key)),
+                "coins": coins,
+                "rpc_password": "pass",
+                "i_am_seed": true,
+            }),
+            "pass".into(),
+            None
+        ));
+        let (_bob_dump_log, _bob_dump_dashboard) = mm_dump(&mm_bob.log_path);
+        log!({"Bob log path: {}", mm_bob.log_path.display()});
+        unwrap!(block_on(
+            mm_bob.wait_for_log(22., |log| log.contains(">>>>>>>>> DEX stats "))
+        ));
+        log!([block_on(enable_native(&mm_bob, "MYCOIN", vec![]))]);
+        log!([block_on(enable_native(&mm_bob, "MYCOIN1", vec![]))]);
+        // issue sell request on Bob side by setting base/rel price
+        log!("Issue bob sell request");
+        let requests = json!(vec![
+            json! ({
+                "userpass": mm_bob.userpass,
+                "method": "setprice",
+                "base": "MYCOIN",
+                "rel": "MYCOIN1",
+                "price": 0.9,
+                "volume": "0.9",
+                "cancel_previous": false,
+            });
+            10000
+        ]);
+
+        let rc = unwrap!(block_on(mm_bob.rpc(requests)));
+        assert!(rc.0.is_success(), "!setprice: {}", rc.1);
+        // Bob orderbook must show the new order
+        log!("Get RICK/MORTY orderbook on Bob side");
+        let rc = unwrap!(block_on(mm_bob.rpc(json! ({
+            "userpass": mm_bob.userpass,
+            "method": "orderbook",
+            "base": "MYCOIN",
+            "rel": "MYCOIN1",
+        }))));
+        assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
+
+        let bob_orderbook: Json = unwrap!(json::from_str(&rc.1));
+        let asks = bob_orderbook["asks"].as_array().unwrap();
+        assert!(asks.len() > 0, "Bob MYCOIN/MYCOIN1 asks are empty");
+        assert_eq!(Json::from("0.9"), asks[0]["maxvolume"]);
+
+        let mut mm_alice = unwrap!(MarketMakerIt::start(
+            json! ({
+                "gui": "nogui",
+                "netid": 9998,
+                "myipaddr": env::var ("ALICE_TRADE_IP") .ok(),
+                "rpcip": env::var ("ALICE_TRADE_IP") .ok(),
+                "passphrase": format!("0x{}", hex::encode(alice_priv_key)),
+                "coins": coins,
+                "seednodes": [fomat!((mm_bob.ip))],
+                "rpc_password": "pass",
+            }),
+            "pass".into(),
+            None
+        ));
+
+        let (_alice_dump_log, _alice_dump_dashboard) = mm_dump(&mm_alice.log_path);
+        log!({ "Alice log path: {}", mm_alice.log_path.display() });
+
+        unwrap!(block_on(
+            mm_alice.wait_for_log(22., |log| log.contains(">>>>>>>>> DEX stats "))
+        ));
+
+        log!([block_on(enable_native(&mm_alice, "MYCOIN", vec![]))]);
+        log!([block_on(enable_native(&mm_alice, "MYCOIN1", vec![]))]);
+        log!("Get MYCOIN/MYCOIN1 orderbook on Alice side");
+        let rc = unwrap!(block_on(mm_alice.rpc(json! ({
+            "userpass": mm_alice.userpass,
+            "method": "orderbook",
+            "base": "MYCOIN",
+            "rel": "MYCOIN1",
+        }))));
+        assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
+
+        let alice_orderbook: Json = unwrap!(json::from_str(&rc.1));
+
+        thread::sleep(Duration::from_secs(45));
+        unwrap!(block_on(mm_bob.stop()));
+        unwrap!(block_on(mm_alice.stop()));
+    }
 }
