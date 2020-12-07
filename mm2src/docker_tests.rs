@@ -2152,6 +2152,7 @@ mod docker_tests {
     }
 
     #[test]
+    #[ignore]
     fn alice_can_see_the_active_order_after_connection() {
         let (_ctx, _, bob_priv_key) = generate_coin_with_random_privkey("MYCOIN", 1000.into());
         let (_ctx, _, alice_priv_key) = generate_coin_with_random_privkey("MYCOIN1", 2000.into());

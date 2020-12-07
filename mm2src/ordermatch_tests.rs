@@ -2100,7 +2100,7 @@ fn test_orderbook_pubkey_sync_request() {
         timestamp: now_ms() / 1000,
     };
 
-    let request = orderbook.process_keep_alive(pubkey, message, false).unwrap();
+    let request = orderbook.process_keep_alive(pubkey, &message, false).unwrap();
     match request {
         OrdermatchRequest::SyncPubkeyOrderbookState {
             trie_roots: pairs_trie_roots,
@@ -2131,7 +2131,7 @@ fn test_orderbook_pubkey_sync_request_relay() {
         timestamp: now_ms() / 1000,
     };
 
-    let request = orderbook.process_keep_alive(pubkey, message, true).unwrap();
+    let request = orderbook.process_keep_alive(pubkey, &message, true).unwrap();
     match request {
         OrdermatchRequest::SyncPubkeyOrderbookState {
             trie_roots: pairs_trie_roots,

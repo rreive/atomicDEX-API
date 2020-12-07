@@ -103,24 +103,47 @@ impl From<(new_protocol::MakerOrderCreated, String)> for OrderbookItem {
     }
 }
 
+enum ProcessPubkeyFullTrieErr {
+    IncorrectOrdersTrieRoot,
+    PopulateTrieError(String),
+}
+
 fn process_pubkey_full_trie(
     orderbook: &mut Orderbook,
     pubkey: &str,
     alb_pair: &str,
     new_trie_orders: PubkeyOrders,
-) -> H64 {
+    expected_root: H64,
+) -> Result<H64, ProcessPubkeyFullTrieErr> {
+    let mut temp_db = MemoryDB::<Blake2Hasher64>::default();
+    let mut new_root = H64::default();
+    let values: Vec<_> = new_trie_orders
+        .iter()
+        .map(|(uuid, order)| {
+            (
+                uuid.as_bytes().to_vec(),
+                rmp_serde::to_vec(&order).expect("serialization failed"),
+            )
+        })
+        .collect();
+    if let Err(e) = populate_trie::<Layout>(&mut temp_db, &mut new_root, &values) {
+        return Err(ProcessPubkeyFullTrieErr::PopulateTrieError(e));
+    }
+
+    if new_root != expected_root {
+        return Err(ProcessPubkeyFullTrieErr::IncorrectOrdersTrieRoot);
+    }
+
     remove_and_purge_pubkey_pair_orders(orderbook, pubkey, alb_pair);
 
     for (_uuid, order) in new_trie_orders {
-        orderbook.insert_or_update_order_update_trie(order).unwrap();
+        orderbook.insert_or_update_order(order);
     }
 
-    let new_root = pubkey_state_mut(&mut orderbook.pubkeys_state, pubkey)
+    pubkey_state_mut(&mut orderbook.pubkeys_state, pubkey)
         .trie_roots
-        .get(alb_pair)
-        .copied()
-        .unwrap_or_else(H64::default);
-    new_root
+        .insert(alb_pair.to_owned(), new_root);
+    Ok(new_root)
 }
 
 fn process_trie_delta(
@@ -169,7 +192,7 @@ async fn process_orders_keep_alive(
         .orderbook
         .lock()
         .await
-        .process_keep_alive(&from_pubkey, keep_alive, i_am_relay);
+        .process_keep_alive(&from_pubkey, &keep_alive, i_am_relay);
 
     let req = match to_request {
         Some(req) => req,
@@ -193,7 +216,18 @@ async fn process_orders_keep_alive(
                 Ok(r) => r,
                 Err(_) => return false,
             },
-            DeltaOrFullTrie::FullTrie(values) => process_pubkey_full_trie(&mut orderbook, &from_pubkey, &pair, values),
+            DeltaOrFullTrie::FullTrie(values) => {
+                match process_pubkey_full_trie(
+                    &mut orderbook,
+                    &from_pubkey,
+                    &pair,
+                    values,
+                    *(keep_alive.trie_roots.get(&pair).unwrap()),
+                ) {
+                    Ok(r) => r,
+                    Err(_) => return false,
+                }
+            },
         };
     }
     true
@@ -267,7 +301,7 @@ async fn request_and_fill_orderbook(ctx: &MmArc, base: &str, rel: &str) -> Resul
 
     let alb_pair = alb_ordered_pair(base, rel);
     for (pubkey, GetOrderbookPubkeyItem { orders, .. }) in pubkey_orders {
-        let _new_root = process_pubkey_full_trie(&mut orderbook, &pubkey, &alb_pair, orders);
+        let _new_root = process_pubkey_full_trie(&mut orderbook, &pubkey, &alb_pair, orders, H64::default());
     }
 
     let topic = orderbook_topic_from_base_rel(base, rel);
@@ -2021,23 +2055,23 @@ impl Orderbook {
     fn process_keep_alive(
         &mut self,
         from_pubkey: &str,
-        message: new_protocol::PubkeyKeepAlive,
+        message: &new_protocol::PubkeyKeepAlive,
         i_am_relay: bool,
     ) -> Option<OrdermatchRequest> {
         let pubkey_state = pubkey_state_mut(&mut self.pubkeys_state, from_pubkey);
 
         let mut trie_roots_to_request = HashMap::new();
-        for (alb_pair, trie_root) in message.trie_roots {
+        for (alb_pair, trie_root) in message.trie_roots.iter() {
             let subscribed = self
                 .topics_subscribed_to
-                .contains_key(&orderbook_topic_from_ordered_pair(&alb_pair));
+                .contains_key(&orderbook_topic_from_ordered_pair(alb_pair));
             if !subscribed && !i_am_relay {
                 continue;
             }
 
-            let actual_trie_root = order_pair_root_mut(&mut pubkey_state.trie_roots, &alb_pair);
-            if *actual_trie_root != trie_root {
-                trie_roots_to_request.insert(alb_pair, trie_root);
+            let actual_trie_root = order_pair_root_mut(&mut pubkey_state.trie_roots, alb_pair);
+            if actual_trie_root != trie_root {
+                trie_roots_to_request.insert(alb_pair.to_owned(), *trie_root);
             }
         }
 
