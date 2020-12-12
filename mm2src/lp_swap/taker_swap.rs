@@ -607,6 +607,7 @@ impl TakerSwap {
     }
 
     async fn start(&self) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
+        /*
         let check_balance_f = check_balance_for_taker_swap(
             &self.ctx,
             &self.taker_coin,
@@ -625,26 +626,12 @@ impl TakerSwap {
                 ERRL!("!can_i_spend_other_payment {}", e).into(),
             )]));
         };
-
+        */
         let started_at = now_ms() / 1000;
 
-        let maker_coin_start_block = match self.maker_coin.current_block().compat().await {
-            Ok(b) => b,
-            Err(e) => {
-                return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
-                    ERRL!("!maker_coin.current_block {}", e).into(),
-                )]))
-            },
-        };
+        let maker_coin_start_block = 0;
 
-        let taker_coin_start_block = match self.taker_coin.current_block().compat().await {
-            Ok(b) => b,
-            Err(e) => {
-                return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
-                    ERRL!("!taker_coin.current_block {}", e).into(),
-                )]))
-            },
-        };
+        let taker_coin_start_block = 0;
 
         let data = TakerSwapData {
             taker_coin: self.taker_coin.ticker().to_owned(),
@@ -752,11 +739,11 @@ impl TakerSwap {
     async fn send_taker_fee(&self) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
         let timeout = self.r().data.started_at + self.r().data.lock_duration / 3;
         let now = now_ms() / 1000;
-        if now > timeout {
-            return Ok((Some(TakerSwapCommand::Finish), vec![
-                TakerSwapEvent::TakerFeeSendFailed(ERRL!("Timeout {} > {}", now, timeout).into()),
-            ]));
-        }
+        // if now > timeout {
+        return Ok((Some(TakerSwapCommand::Finish), vec![
+            TakerSwapEvent::TakerFeeSendFailed(ERRL!("Timeout {} > {}", now, timeout).into()),
+        ]));
+        // }
 
         let fee_addr_pub_key = unwrap!(hex::decode(
             "03bc2c7ba671bae4a6fc835244c9762b41647b9827d4780a89a949b984a8ddcc06"

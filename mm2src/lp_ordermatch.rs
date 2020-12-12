@@ -2529,8 +2529,8 @@ pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
         return ERR!("Rel coin is wallet only");
     }
     let my_amount = &input.volume * &input.price;
-    try_s!(check_balance_for_taker_swap(&ctx, &rel_coin, &base_coin, my_amount, None).await);
-    try_s!(base_coin.can_i_spend_other_payment().compat().await);
+    // try_s!(check_balance_for_taker_swap(&ctx, &rel_coin, &base_coin, my_amount, None).await);
+    // try_s!(base_coin.can_i_spend_other_payment().compat().await);
     let res = try_s!(lp_auto_buy(&ctx, &base_coin, &rel_coin, input).await).into_bytes();
     Ok(try_s!(Response::builder().body(res)))
 }
@@ -2550,8 +2550,8 @@ pub async fn sell(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     if rel_coin.wallet_only() {
         return ERR!("Rel coin is wallet only");
     }
-    try_s!(check_balance_for_taker_swap(&ctx, &base_coin, &rel_coin, input.volume.clone(), None).await);
-    try_s!(rel_coin.can_i_spend_other_payment().compat().await);
+    // try_s!(check_balance_for_taker_swap(&ctx, &base_coin, &rel_coin, input.volume.clone(), None).await);
+    // try_s!(rel_coin.can_i_spend_other_payment().compat().await);
     let res = try_s!(lp_auto_buy(&ctx, &base_coin, &rel_coin, input).await).into_bytes();
     Ok(try_s!(Response::builder().body(res)))
 }

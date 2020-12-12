@@ -247,6 +247,7 @@ impl MakerSwap {
     }
 
     async fn start(&self) -> Result<(Option<MakerSwapCommand>, Vec<MakerSwapEvent>), String> {
+        /*
         match check_balance_for_maker_swap(
             &self.ctx,
             &self.maker_coin,
@@ -268,7 +269,7 @@ impl MakerSwap {
                 ERRL!("!can_i_spend_other_payment {}", e).into(),
             )]));
         };
-
+        */
         let secret: [u8; 32] = {
             #[cfg(feature = "native")]
             let mut rng = rand::thread_rng();
@@ -280,23 +281,9 @@ impl MakerSwap {
             rng.gen()
         };
         let started_at = now_ms() / 1000;
-        let maker_coin_start_block = match self.maker_coin.current_block().compat().await {
-            Ok(b) => b,
-            Err(e) => {
-                return Ok((Some(MakerSwapCommand::Finish), vec![MakerSwapEvent::StartFailed(
-                    ERRL!("!maker_coin.current_block {}", e).into(),
-                )]))
-            },
-        };
+        let maker_coin_start_block = 0;
 
-        let taker_coin_start_block = match self.taker_coin.current_block().compat().await {
-            Ok(b) => b,
-            Err(e) => {
-                return Ok((Some(MakerSwapCommand::Finish), vec![MakerSwapEvent::StartFailed(
-                    ERRL!("!taker_coin.current_block {}", e).into(),
-                )]))
-            },
-        };
+        let taker_coin_start_block = 0;
 
         let data = MakerSwapData {
             taker_coin: self.taker_coin.ticker().to_owned(),
