@@ -1094,6 +1094,9 @@ impl Gossipsub {
 
     pub fn get_all_peer_topics(&self) -> &HashMap<PeerId, Vec<TopicHash>> { &self.peer_topics }
 
+    /// Get count of received messages in the [`GossipsubConfig::duplicate_cache_time`] period.
+    pub fn get_received_messages_in_period(&self) -> (Duration, usize) { (self.received.ttl(), self.received.len()) }
+
     pub fn get_config(&self) -> &GossipsubConfig { &self.config }
 
     /// Adds peers to relays mesh and notifies them they are added
