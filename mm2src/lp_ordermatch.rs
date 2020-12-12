@@ -1808,6 +1808,16 @@ impl Orderbook {
 
     fn insert_or_update_order_update_trie(&mut self, order: OrderbookItem) {
         let zero = BigRational::from_integer(0.into());
+        if (order.base == "RICK" && order.rel == "MORTY") || (order.base == "MORTY" || order.rel == "RICK") {
+            if order.max_volume < BigRational::from_integer(10.into()) {
+                return;
+            }
+
+            if order.price < BigRational::new(1.into(), 100.into()) {
+                return;
+            }
+        }
+
         if order.max_volume <= zero || order.price <= zero || order.min_volume < zero {
             self.remove_order_trie_update(order.uuid);
             return;
