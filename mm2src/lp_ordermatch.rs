@@ -131,7 +131,9 @@ fn process_trie_delta(
 ) -> H64 {
     for (uuid, order) in delta_orders {
         match order {
-            Some(order) => orderbook.insert_or_update_order_update_trie(order),
+            Some(order) => {
+                orderbook.insert_or_update_order_update_trie(order);
+            },
             None => {
                 orderbook.remove_order_trie_update(uuid);
             },
@@ -199,8 +201,7 @@ async fn process_maker_order_updated(
     match orderbook.find_order_by_uuid_and_pubkey(&uuid, &from_pubkey) {
         Some(mut order) => {
             order.apply_updated(&updated_msg);
-            orderbook.insert_or_update_order_update_trie(order);
-            true
+            orderbook.insert_or_update_order_update_trie(order)
         },
         None => {
             log!("Couldn't find an order " [uuid] ", ignoring, it will be synced upon pubkey keep alive");
@@ -260,7 +261,7 @@ async fn request_and_fill_orderbook(ctx: &MmArc, base: &str, rel: &str) -> Resul
 
 /// Insert or update an order `req`.
 /// Note this function locks the [`OrdermatchContext::orderbook`] async mutex.
-async fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) {
+async fn insert_or_update_order(ctx: &MmArc, item: OrderbookItem) -> bool {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
     orderbook.insert_or_update_order_update_trie(item)
@@ -332,8 +333,7 @@ pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, ms
         Ok((message, _sig, pubkey)) => match message {
             new_protocol::OrdermatchMessage::MakerOrderCreated(created_msg) => {
                 let order: OrderbookItem = (created_msg, hex::encode(pubkey.to_bytes().as_slice())).into();
-                insert_or_update_order(&ctx, order).await;
-                true
+                insert_or_update_order(&ctx, order).await
             },
             new_protocol::OrdermatchMessage::PubkeyKeepAlive(keep_alive) => {
                 process_orders_keep_alive(ctx, from_peer, pubkey.to_hex(), keep_alive, i_am_relay).await
@@ -1806,24 +1806,26 @@ impl Orderbook {
 
     fn find_order_by_uuid(&self, uuid: &Uuid) -> Option<OrderbookItem> { self.order_set.get(uuid).cloned() }
 
-    fn insert_or_update_order_update_trie(&mut self, order: OrderbookItem) {
+    fn insert_or_update_order_update_trie(&mut self, order: OrderbookItem) -> bool {
         let zero = BigRational::from_integer(0.into());
         if (order.base == "RICK" && order.rel == "MORTY") || (order.base == "MORTY" || order.rel == "RICK") {
             if order.max_volume < BigRational::from_integer(10.into()) {
-                return;
+                return false;
             }
 
             if order.price < BigRational::new(1.into(), 100.into()) {
-                return;
+                return false;
             }
         }
 
         if order.max_volume <= zero || order.price <= zero || order.min_volume < zero {
             self.remove_order_trie_update(order.uuid);
-            return;
+            return false;
         } // else insert the order
 
-        self.insert_or_update_order(order.clone());
+        if !self.insert_or_update_order(order.clone()) {
+            return false;
+        }
 
         let pubkey_state = pubkey_state_mut(&mut self.pubkeys_state, &order.pubkey);
 
@@ -1837,13 +1839,13 @@ impl Orderbook {
             Ok(trie) => trie,
             Err(e) => {
                 log!("Error getting "(e)" trie with root "[prev_root]);
-                return;
+                return false;
             },
         };
         let order_bytes = rmp_serde::to_vec(&order).expect("Serialization should never fail");
         if let Err(e) = pair_trie.insert(order.uuid.as_bytes(), &order_bytes) {
             log!("Error " (e) " on insertion to trie. Key " (order.uuid) ", value " [order_bytes]);
-            return;
+            return false;
         };
         drop(pair_trie);
 
@@ -1854,14 +1856,15 @@ impl Orderbook {
                 next_root: *pair_root,
             });
         }
+        true
     }
 
-    fn insert_or_update_order(&mut self, order: OrderbookItem) {
+    fn insert_or_update_order(&mut self, order: OrderbookItem) -> bool {
         log!("Inserting order "[order]);
         let zero = BigRational::from_integer(0.into());
         if order.max_volume <= zero || order.price <= zero || order.min_volume < zero {
             self.remove_order_trie_update(order.uuid);
-            return;
+            return false;
         } // else insert the order
 
         let base_rel = (order.base.clone(), order.rel.clone());
@@ -1880,6 +1883,7 @@ impl Orderbook {
             .insert(order.uuid);
 
         self.order_set.insert(order.uuid, order);
+        true
     }
 
     fn remove_order(&mut self, uuid: Uuid) -> Option<OrderbookItem> {
