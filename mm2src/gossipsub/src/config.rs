@@ -109,7 +109,7 @@ impl Default for GossipsubConfig {
             heartbeat_interval: Duration::from_secs(1),
             fanout_ttl: Duration::from_secs(60),
             max_transmit_size: 2048,
-            duplicate_cache_time: Duration::from_secs(60),
+            duplicate_cache_time: Duration::from_secs(180),
             hash_topics: false, // default compatibility with floodsub
             no_source_id: false,
             manual_propagation: false,
