@@ -159,11 +159,12 @@ async fn process_orders_keep_alive(
     i_am_relay: bool,
 ) -> bool {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
-    let to_request = ordermatch_ctx
-        .orderbook
-        .lock()
-        .await
-        .process_keep_alive(&from_pubkey, keep_alive, i_am_relay);
+    let to_request =
+        ordermatch_ctx
+            .orderbook
+            .lock()
+            .await
+            .process_keep_alive(&from_pubkey, keep_alive.clone(), i_am_relay);
 
     let req = match to_request {
         Some(req) => req,
@@ -182,10 +183,13 @@ async fn process_orders_keep_alive(
 
     let mut orderbook = ordermatch_ctx.orderbook.lock().await;
     for (pair, diff) in response.pair_orders_diff {
-        let _new_root = match diff {
+        let new_root = match diff {
             DeltaOrFullTrie::Delta(delta) => process_trie_delta(&mut orderbook, &from_pubkey, &pair, delta),
             DeltaOrFullTrie::FullTrie(values) => process_pubkey_full_trie(&mut orderbook, &from_pubkey, &pair, values),
         };
+        if Some(&new_root) != keep_alive.trie_roots.get(&pair) {
+            return false;
+        }
     }
     true
 }

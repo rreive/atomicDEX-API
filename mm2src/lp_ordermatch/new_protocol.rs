@@ -124,7 +124,7 @@ pub struct MakerOrderCreated {
     pub pair_trie_root: H64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PubkeyKeepAlive {
     pub trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
     pub timestamp: u64,
