@@ -275,7 +275,7 @@ impl Qrc20Coin {
                 match receiver_spend_call_details_from_script_pubkey(&script_pubkey) {
                     Ok(details) => details,
                     Err(e) => {
-                        log!((e));
+                        error!("{}", e);
                         // try to obtain the details from the next output
                         continue;
                     },
@@ -283,7 +283,10 @@ impl Qrc20Coin {
 
             let actual_secret_hash = &*dhash160(&secret);
             if actual_secret_hash != secret_hash {
-                log!("Warning: invalid 'dhash160(secret)' "[actual_secret_hash]", expected "[secret_hash]);
+                warn!(
+                    "invalid 'dhash160(secret)' {:?}, expected {:?}",
+                    actual_secret_hash, secret_hash,
+                );
                 continue;
             }
 
@@ -871,7 +874,10 @@ fn find_receiver_spend_with_swap_id_and_secret_hash(
 
         let secret_hash = &*dhash160(&secret);
         if secret_hash != expected_secret_hash {
-            log!("Warning: invalid 'dhash160(secret)' "[secret_hash]", expected "[expected_secret_hash]);
+            warn!(
+                "invalid 'dhash160(secret)' {:?}, expected {:?}",
+                secret_hash, expected_secret_hash
+            );
             continue;
         }
 
@@ -897,7 +903,7 @@ fn find_swap_contract_call_with_swap_id(
         let contract_call_bytes = match extract_contract_call_from_script(&script_pubkey) {
             Ok(bytes) => bytes,
             Err(e) => {
-                log!([e]);
+                error!("{}", e);
                 continue;
             },
         };
@@ -906,7 +912,7 @@ fn find_swap_contract_call_with_swap_id(
             Ok(Some(t)) => t,
             Ok(None) => continue, // unknown contract call type
             Err(e) => {
-                log!([e]);
+                error!("{}", e);
                 continue;
             },
         };
@@ -919,7 +925,7 @@ fn find_swap_contract_call_with_swap_id(
         let decoded = match function.decode_input(&contract_call_bytes) {
             Ok(d) => d,
             Err(e) => {
-                log!([e]);
+                error!("{}", e);
                 continue;
             },
         };
@@ -928,11 +934,11 @@ fn find_swap_contract_call_with_swap_id(
         let swap_id = match decoded.into_iter().next() {
             Some(Token::FixedBytes(id)) => id,
             Some(token) => {
-                log!("Warning: tx "[tx_hash]" 'swap_id' arg is invalid, found "[token]);
+                warn!("tx {:?} 'swap_id' arg is invalid, found {:?}", tx_hash, token);
                 continue;
             },
             None => {
-                log!("Warning: couldn't find 'swap_id' in "[tx_hash]);
+                warn!("Warning: couldn't find 'swap_id' in {:?}", tx_hash);
                 continue;
             },
         };

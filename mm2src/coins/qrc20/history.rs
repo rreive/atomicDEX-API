@@ -291,13 +291,13 @@ impl Qrc20Coin {
             let my_balance_change = &received_by_me - &spent_by_me;
             let internal_id = TxInternalId::new(tx_hash.clone(), receipt.output_index, log_index as u64);
 
-            let from = if is_sender_contract(&script_pubkey) {
+            let from = if is_transferred_from_contract(&script_pubkey) {
                 qtum::display_as_contract_address(from)
             } else {
                 try_s!(self.display_address(&from))
             };
 
-            let to = if is_receiver_contract(&script_pubkey) {
+            let to = if is_transferred_to_contract(&script_pubkey) {
                 qtum::display_as_contract_address(to)
             } else {
                 try_s!(self.display_address(&to))
@@ -532,6 +532,10 @@ impl Qrc20Coin {
 
 pub struct TransferHistoryBuilder {
     coin: Qrc20Coin,
+    params: TransferHistoryParams,
+}
+
+struct TransferHistoryParams {
     from_block: u64,
     address: H160,
     token_address: H160,
@@ -541,79 +545,72 @@ impl TransferHistoryBuilder {
     pub fn new(coin: Qrc20Coin) -> TransferHistoryBuilder {
         let address = qtum::contract_addr_from_utxo_addr(coin.utxo.my_address.clone());
         let token_address = coin.contract_address;
-        TransferHistoryBuilder {
-            coin,
+        let params = TransferHistoryParams {
             from_block: 0,
             address,
             token_address,
-        }
+        };
+        TransferHistoryBuilder { coin, params }
     }
 
     #[allow(clippy::wrong_self_convention)]
     pub fn from_block(mut self, from_block: u64) -> TransferHistoryBuilder {
-        self.from_block = from_block;
+        self.params.from_block = from_block;
         self
     }
 
     pub fn address(mut self, address: H160) -> TransferHistoryBuilder {
-        self.address = address;
+        self.params.address = address;
         self
     }
 
     #[allow(dead_code)]
     pub fn token_address(mut self, token_address: H160) -> TransferHistoryBuilder {
-        self.token_address = token_address;
+        self.params.token_address = token_address;
         self
     }
 
     pub async fn build(self) -> Result<Vec<TxReceipt>, JsonRpcError> {
-        match self.coin.utxo.rpc_client {
-            UtxoRpcClientEnum::Native(ref native) => self.build_receipts_with_native(native).await,
-            UtxoRpcClientEnum::Electrum(ref electrum) => self.build_receipts_with_electrum(electrum).await,
-        }
+        self.coin.utxo.rpc_client.build(self.params).await
     }
 
     pub async fn build_tx_idents(self) -> Result<Vec<(H256Json, u64)>, JsonRpcError> {
-        match self.coin.utxo.rpc_client {
-            UtxoRpcClientEnum::Native(ref native) => self.build_tx_ident_with_native(native).await,
-            UtxoRpcClientEnum::Electrum(ref electrum) => self.build_tx_idents_with_electrum(electrum).await,
+        self.coin.utxo.rpc_client.build_tx_idents(self.params).await
+    }
+}
+
+#[async_trait]
+trait BuildTransferHistory {
+    async fn build(&self, params: TransferHistoryParams) -> Result<Vec<TxReceipt>, JsonRpcError>;
+
+    async fn build_tx_idents(&self, params: TransferHistoryParams) -> Result<Vec<(H256Json, u64)>, JsonRpcError>;
+}
+
+#[async_trait]
+impl BuildTransferHistory for UtxoRpcClientEnum {
+    async fn build(&self, params: TransferHistoryParams) -> Result<Vec<TxReceipt>, JsonRpcError> {
+        match self {
+            UtxoRpcClientEnum::Native(native) => native.build(params).await,
+            UtxoRpcClientEnum::Electrum(electrum) => electrum.build(params).await,
         }
     }
 
-    async fn build_tx_idents_with_electrum(
-        &self,
-        electrum: &ElectrumClient,
-    ) -> Result<Vec<(H256Json, u64)>, JsonRpcError> {
-        let address = contract_addr_into_rpc_format(&self.address);
-        let token_address = contract_addr_into_rpc_format(&self.token_address);
-        let history = electrum
-            .blockchain_contract_event_get_history(&address, &token_address, QRC20_TRANSFER_TOPIC)
-            .compat()
-            .await?;
-
-        Ok(history
-            .into_iter()
-            .filter(|item| self.from_block <= item.height)
-            .map(|tx| (tx.tx_hash, tx.height))
-            .unique()
-            .collect())
+    async fn build_tx_idents(&self, params: TransferHistoryParams) -> Result<Vec<(H256Json, u64)>, JsonRpcError> {
+        match self {
+            UtxoRpcClientEnum::Native(native) => native.build_tx_idents(params).await,
+            UtxoRpcClientEnum::Electrum(electrum) => electrum.build_tx_idents(params).await,
+        }
     }
+}
 
-    async fn build_tx_ident_with_native(&self, native: &NativeClient) -> Result<Vec<(H256Json, u64)>, JsonRpcError> {
-        let receipts = self.build_receipts_with_native(native).await?;
-        Ok(receipts
-            .into_iter()
-            .map(|receipt| (receipt.transaction_hash, receipt.block_number))
-            .unique()
-            .collect())
-    }
-
-    async fn build_receipts_with_electrum(&self, electrum: &ElectrumClient) -> Result<Vec<TxReceipt>, JsonRpcError> {
-        let tx_idents = self.build_tx_idents_with_electrum(electrum).await?;
+#[async_trait]
+impl BuildTransferHistory for ElectrumClient {
+    async fn build(&self, params: TransferHistoryParams) -> Result<Vec<TxReceipt>, JsonRpcError> {
+        let tx_idents = self.build_tx_idents(params).await?;
 
         let mut receipts = Vec::new();
         for (tx_hash, _height) in tx_idents {
-            let mut tx_receipts = electrum.blochchain_transaction_get_receipt(&tx_hash).compat().await?;
+            let mut tx_receipts = self.blochchain_transaction_get_receipt(&tx_hash).compat().await?;
             // remove receipts of contract calls didn't emit at least one `Transfer` event
             tx_receipts.retain(|receipt| receipt.log.iter().any(is_transfer_event_log));
             receipts.extend(tx_receipts.into_iter());
@@ -622,11 +619,30 @@ impl TransferHistoryBuilder {
         Ok(receipts)
     }
 
-    async fn build_receipts_with_native(&self, native: &NativeClient) -> Result<Vec<TxReceipt>, JsonRpcError> {
+    async fn build_tx_idents(&self, params: TransferHistoryParams) -> Result<Vec<(H256Json, u64)>, JsonRpcError> {
+        let address = contract_addr_into_rpc_format(&params.address);
+        let token_address = contract_addr_into_rpc_format(&params.token_address);
+        let history = self
+            .blockchain_contract_event_get_history(&address, &token_address, QRC20_TRANSFER_TOPIC)
+            .compat()
+            .await?;
+
+        Ok(history
+            .into_iter()
+            .filter(|item| params.from_block <= item.height)
+            .map(|tx| (tx.tx_hash, tx.height))
+            .unique()
+            .collect())
+    }
+}
+
+#[async_trait]
+impl BuildTransferHistory for NativeClient {
+    async fn build(&self, params: TransferHistoryParams) -> Result<Vec<TxReceipt>, JsonRpcError> {
         const SEARCH_LOGS_STEP: u64 = 100;
 
-        let token_address = contract_addr_into_rpc_format(&self.token_address);
-        let address_topic = address_to_log_topic(&self.address);
+        let token_address = contract_addr_into_rpc_format(&params.token_address);
+        let address_topic = address_to_log_topic(&params.address);
 
         // «Skip the log if none of the topics are matched»
         // https://github.com/qtumproject/qtum-enterprise/blob/qtumx_beta_0.16.0/src/rpc/blockchain.cpp#L1590
@@ -640,13 +656,13 @@ impl TransferHistoryBuilder {
             TopicFilter::Match(address_topic.clone()), // `receiver` address in `Transfer` event
         ];
 
-        let block_count = native.get_block_count().compat().await?;
+        let block_count = self.get_block_count().compat().await?;
 
         let mut result = Vec::new();
-        let mut from_block = self.from_block;
+        let mut from_block = params.from_block;
         while from_block <= block_count {
             let to_block = from_block + SEARCH_LOGS_STEP - 1;
-            let mut receipts = native
+            let mut receipts = self
                 .search_logs(from_block, Some(to_block), vec![token_address.clone()], topics.clone())
                 .compat()
                 .await?;
@@ -659,13 +675,22 @@ impl TransferHistoryBuilder {
         }
         Ok(result)
     }
+
+    async fn build_tx_idents(&self, params: TransferHistoryParams) -> Result<Vec<(H256Json, u64)>, JsonRpcError> {
+        let receipts = self.build(params).await?;
+        Ok(receipts
+            .into_iter()
+            .map(|receipt| (receipt.transaction_hash, receipt.block_number))
+            .unique()
+            .collect())
+    }
 }
 
-fn is_sender_contract(script_pubkey: &Script) -> bool {
+fn is_transferred_from_contract(script_pubkey: &Script) -> bool {
     let contract_call_bytes = match extract_contract_call_from_script(&script_pubkey) {
         Ok(bytes) => bytes,
         Err(e) => {
-            log!((e));
+            error!("{}", e);
             return false;
         },
     };
@@ -673,7 +698,7 @@ fn is_sender_contract(script_pubkey: &Script) -> bool {
         Ok(Some(t)) => t,
         Ok(None) => return false,
         Err(e) => {
-            log!((e));
+            error!("{}", e);
             return false;
         },
     };
@@ -685,11 +710,11 @@ fn is_sender_contract(script_pubkey: &Script) -> bool {
     }
 }
 
-fn is_receiver_contract(script_pubkey: &Script) -> bool {
+fn is_transferred_to_contract(script_pubkey: &Script) -> bool {
     let contract_call_bytes = match extract_contract_call_from_script(&script_pubkey) {
         Ok(bytes) => bytes,
         Err(e) => {
-            log!((e));
+            error!("{}", e);
             return false;
         },
     };
@@ -697,7 +722,7 @@ fn is_receiver_contract(script_pubkey: &Script) -> bool {
         Ok(Some(t)) => t,
         Ok(None) => return false,
         Err(e) => {
-            log!((e));
+            error!("{}", e);
             return false;
         },
     };

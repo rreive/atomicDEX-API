@@ -16,6 +16,7 @@ use chain::TransactionOutput;
 use common::block_on;
 use common::executor::Timer;
 use common::jsonrpc_client::{JsonRpcClient, JsonRpcError, JsonRpcRequest, RpcRes};
+use common::log::{error, warn};
 use common::mm_ctx::MmArc;
 use ethabi::{Function, Token};
 use ethereum_types::{H160, U256};
@@ -856,7 +857,6 @@ impl MmCoin for Qrc20Coin {
             let gas_fee = QRC20_GAS_LIMIT_DEFAULT * QRC20_GAS_PRICE_DEFAULT;
             let min_amount: U256 = try_s!(selfi.get_qrc20_tx_fee(gas_fee).await).into();
 
-            log!("qtum_balance " [qtum_balance_sat] " min_amount " (min_amount));
             if qtum_balance_sat < min_amount {
                 // u256_to_big_decimal() is expected to return no error
                 let min_amount = try_s!(u256_to_big_decimal(min_amount, selfi.utxo.decimals));
