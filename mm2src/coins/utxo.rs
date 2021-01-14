@@ -479,7 +479,21 @@ impl From<Arc<UtxoCoinFields>> for UtxoArc {
 
 impl UtxoArc {
     /// Returns weak reference to the inner UtxoCoinFields
-    fn downgrade(&self) -> Weak<UtxoCoinFields> { Arc::downgrade(&self.0) }
+    fn downgrade(&self) -> UtxoWeak {
+        let weak = Arc::downgrade(&self.0);
+        UtxoWeak(weak)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct UtxoWeak(Weak<UtxoCoinFields>);
+
+impl From<Weak<UtxoCoinFields>> for UtxoWeak {
+    fn from(weak: Weak<UtxoCoinFields>) -> Self { UtxoWeak(weak) }
+}
+
+impl UtxoWeak {
+    fn upgrade(&self) -> Option<UtxoArc> { self.0.upgrade().map(UtxoArc::from) }
 }
 
 // We can use a shared UTXO lock for all UTXO coins at 1 time.
@@ -741,11 +755,7 @@ pub trait UtxoCoinBuilder {
 
         // should be sufficient to detect zcash by overwintered flag
         let zcash = overwintered;
-        let initial_history_state = if self.req()["tx_history"].as_bool().unwrap_or(false) {
-            HistorySyncState::NotStarted
-        } else {
-            HistorySyncState::NotEnabled
-        };
+        let initial_history_state = self.initial_history_state();
 
         let required_confirmations = self.required_confirmations();
         let requires_notarization = self.requires_notarization();
@@ -962,6 +972,14 @@ pub trait UtxoCoinBuilder {
             return json::from_value(conf["network"].clone()).map_err(|e| ERRL!("{}", e));
         }
         Ok(BlockchainNetwork::Mainnet)
+    }
+
+    fn initial_history_state(&self) -> HistorySyncState {
+        if self.req()["tx_history"].as_bool().unwrap_or(false) {
+            HistorySyncState::NotStarted
+        } else {
+            HistorySyncState::NotEnabled
+        }
     }
 
     async fn rpc_client(&self) -> Result<UtxoRpcClientEnum, String> {

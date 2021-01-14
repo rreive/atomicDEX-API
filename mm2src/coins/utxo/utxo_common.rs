@@ -5,12 +5,12 @@ use chain::constants::SEQUENCE_FINAL;
 use chain::{OutPoint, TransactionInput, TransactionOutput};
 use common::executor::Timer;
 use common::jsonrpc_client::{JsonRpcError, JsonRpcErrorType};
+use common::log::{error, info};
 use common::mm_ctx::MmArc;
 use common::mm_metrics::MetricsArc;
 use futures::compat::Future01CompatExt;
 use futures::future::{FutureExt, TryFutureExt};
 use futures01::future::Either;
-#[cfg(feature = "native")] use futures01::Future;
 use gstuff::now_ms;
 use keys::bytes::Bytes;
 use keys::{Address, KeyPair, Public, Type};
@@ -31,7 +31,7 @@ pub use chain::Transaction as UtxoTx;
 
 use self::rpc_clients::{electrum_script_hash, UnspentInfo, UtxoRpcClientEnum};
 use crate::utxo::rpc_clients::UtxoRpcClientOps;
-use crate::ValidateAddressResult;
+use crate::{ArcDowngradableCoin, ValidateAddressResult, WeakUpgradableCoin};
 use common::block_on;
 
 macro_rules! true_or {
@@ -51,39 +51,45 @@ lazy_static! {
 
 pub const HISTORY_TOO_LARGE_ERR_CODE: i64 = -1;
 
-pub struct UtxoArcBuilder<'a> {
+pub struct UtxoArcBuilder<'a, T> {
     ctx: &'a MmArc,
     ticker: &'a str,
     conf: &'a Json,
     req: &'a Json,
     priv_key: &'a [u8],
+    phantom: std::marker::PhantomData<T>,
 }
 
-impl<'a> UtxoArcBuilder<'a> {
+impl<'a, T> UtxoArcBuilder<'a, T> {
     pub fn new(
         ctx: &'a MmArc,
         ticker: &'a str,
         conf: &'a Json,
         req: &'a Json,
         priv_key: &'a [u8],
-    ) -> UtxoArcBuilder<'a> {
+    ) -> UtxoArcBuilder<'a, T> {
         UtxoArcBuilder {
             ctx,
             ticker,
             conf,
             req,
             priv_key,
+            phantom: std::marker::PhantomData::default(),
         }
     }
 }
 
 #[async_trait]
-impl UtxoCoinBuilder for UtxoArcBuilder<'_> {
-    type ResultCoin = UtxoArc;
+impl<T> UtxoCoinBuilder for UtxoArcBuilder<'_, T>
+where
+    T: From<UtxoArc> + Send + Sync,
+{
+    type ResultCoin = T;
 
     async fn build(self) -> Result<Self::ResultCoin, String> {
         let utxo = try_s!(self.build_utxo_fields().await);
-        Ok(UtxoArc(Arc::new(utxo)))
+        let arc = UtxoArc(Arc::new(utxo));
+        Ok(T::from(arc))
     }
 
     fn ctx(&self) -> &MmArc { self.ctx }
@@ -97,15 +103,46 @@ impl UtxoCoinBuilder for UtxoArcBuilder<'_> {
     fn priv_key(&self) -> &[u8] { self.priv_key }
 }
 
-pub async fn utxo_arc_from_conf_and_request(
+pub async fn utxo_arc_from_conf_and_request<T, W>(
     ctx: &MmArc,
     ticker: &str,
     conf: &Json,
     req: &Json,
     priv_key: &[u8],
-) -> Result<UtxoArc, String> {
-    let builder = UtxoArcBuilder::new(ctx, ticker, conf, req, priv_key);
-    builder.build().await
+) -> Result<T, String>
+where
+    T: ArcDowngradableCoin<Target = W> + From<UtxoArc> + AsRef<UtxoCoinFields> + UtxoCommonOps + Send + Sync + 'static,
+    W: WeakUpgradableCoin<Target = T> + Send + Sync + 'static,
+{
+    let builder = UtxoArcBuilder::<T>::new(ctx, ticker, conf, req, priv_key);
+    let coin = try_s!(builder.build().await);
+
+    let merge_params: Option<UtxoMergeParams> = try_s!(json::from_value(req["utxo_merge_params"].clone()));
+    if let Some(merge_params) = merge_params {
+        let weak = coin.downgrade();
+        let merge_loop = merge_utxo_loop::<T, W>(
+            weak,
+            merge_params.merge_at,
+            merge_params.check_every,
+            merge_params.max_merge_at_once,
+        );
+        info!("Starting UTXO merge loop for coin {}", ticker);
+        spawn(merge_loop);
+    }
+    Ok(coin)
+}
+
+fn ten_f64() -> f64 { 10. }
+
+fn one_hundred() -> usize { 100 }
+
+#[derive(Debug, Deserialize)]
+struct UtxoMergeParams {
+    merge_at: usize,
+    #[serde(default = "ten_f64")]
+    check_every: f64,
+    #[serde(default = "one_hundred")]
+    max_merge_at_once: usize,
 }
 
 pub async fn get_tx_fee(coin: &UtxoCoinFields) -> Result<ActualTxFee, JsonRpcError> {
@@ -2177,4 +2214,50 @@ where
     // all duplicates will be removed because vector in sorted before dedup
     unspents.dedup_by(|one, another| one.outpoint == another.outpoint);
     Ok((unspents, recently_spent))
+}
+
+async fn merge_utxo_loop<T, W>(weak: W, merge_at: usize, check_every: f64, max_merge_at_once: usize)
+where
+    W: WeakUpgradableCoin<Target = T>,
+    T: AsRef<UtxoCoinFields> + UtxoCommonOps,
+{
+    loop {
+        Timer::sleep(check_every).await;
+
+        let coin = match weak.upgrade() {
+            Some(a) => a,
+            None => break,
+        };
+
+        let ticker = &coin.as_ref().ticker;
+        let (unspents, recently_spent) = match coin.list_unspent_ordered(&coin.as_ref().my_address).await {
+            Ok((unspents, recently_spent)) => (unspents, recently_spent),
+            Err(e) => {
+                error!("Error {} on list_unspent_ordered of coin {}", e, ticker);
+                continue;
+            },
+        };
+        if unspents.len() >= merge_at {
+            let unspents: Vec<_> = unspents.into_iter().take(max_merge_at_once).collect();
+            info!("Trying to merge {} UTXOs of coin {}", unspents.len(), ticker);
+            let value = unspents.iter().fold(0, |sum, unspent| sum + unspent.value);
+            let script_pubkey = Builder::build_p2pkh(&coin.as_ref().my_address.hash).to_bytes();
+            let output = TransactionOutput { value, script_pubkey };
+            let merge_tx_fut = generate_and_send_tx(
+                &coin,
+                unspents,
+                vec![output],
+                FeePolicy::DeductFromOutput(0),
+                recently_spent,
+            );
+            match merge_tx_fut.await {
+                Ok(tx) => info!(
+                    "UTXO merge successful for coin {}, tx_hash {:?}",
+                    ticker,
+                    tx.hash().reversed()
+                ),
+                Err(e) => error!("Error {} on UTXO merge attempt for coin {}", e, ticker),
+            }
+        }
+    }
 }

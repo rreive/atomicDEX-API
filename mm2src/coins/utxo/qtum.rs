@@ -1,5 +1,5 @@
 use super::*;
-use crate::{eth, SwapOps, ValidateAddressResult};
+use crate::{eth, ArcDowngradableCoin, SwapOps, ValidateAddressResult, WeakUpgradableCoin};
 use common::mm_metrics::MetricsArc;
 use ethereum_types::H160;
 use futures::{FutureExt, TryFutureExt};
@@ -110,6 +110,23 @@ impl From<QtumCoin> for UtxoArc {
     fn from(coin: QtumCoin) -> Self { coin.utxo_arc }
 }
 
+impl ArcDowngradableCoin for QtumCoin {
+    type Target = QtumWeak;
+    fn downgrade(&self) -> Self::Target {
+        let weak = self.utxo_arc.downgrade();
+        QtumWeak(weak)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct QtumWeak(UtxoWeak);
+
+impl WeakUpgradableCoin for QtumWeak {
+    type Target = QtumCoin;
+
+    fn upgrade(&self) -> Option<Self::Target> { self.0.upgrade().map(QtumCoin::from) }
+}
+
 pub async fn qtum_coin_from_conf_and_request(
     ctx: &MmArc,
     ticker: &str,
@@ -117,8 +134,8 @@ pub async fn qtum_coin_from_conf_and_request(
     req: &Json,
     priv_key: &[u8],
 ) -> Result<QtumCoin, String> {
-    let inner = try_s!(utxo_common::utxo_arc_from_conf_and_request(ctx, ticker, conf, req, priv_key).await);
-    Ok(inner.into())
+    let coin: QtumCoin = try_s!(utxo_common::utxo_arc_from_conf_and_request(ctx, ticker, conf, req, priv_key).await);
+    Ok(coin)
 }
 
 impl QtumBasedCoin for QtumCoin {}

@@ -1,6 +1,5 @@
 use super::*;
-use crate::{SwapOps, ValidateAddressResult};
-use common::log::{error, info};
+use crate::{ArcDowngradableCoin, SwapOps, ValidateAddressResult, WeakUpgradableCoin};
 use common::mm_metrics::MetricsArc;
 use futures::{FutureExt, TryFutureExt};
 
@@ -17,25 +16,25 @@ impl From<UtxoArc> for UtxoStandardCoin {
     fn from(coin: UtxoArc) -> UtxoStandardCoin { UtxoStandardCoin { utxo_arc: coin } }
 }
 
-impl From<Arc<UtxoCoinFields>> for UtxoStandardCoin {
-    fn from(arc: Arc<UtxoCoinFields>) -> UtxoStandardCoin { UtxoStandardCoin { utxo_arc: arc.into() } }
-}
-
 impl From<UtxoStandardCoin> for UtxoArc {
     fn from(coin: UtxoStandardCoin) -> Self { coin.utxo_arc }
 }
 
-fn ten_f64() -> f64 { 10. }
+impl ArcDowngradableCoin for UtxoStandardCoin {
+    type Target = UtxoStandardWeak;
+    fn downgrade(&self) -> Self::Target {
+        let weak = self.utxo_arc.downgrade();
+        UtxoStandardWeak(weak)
+    }
+}
 
-fn one_hundred() -> usize { 100 }
+#[derive(Clone, Debug)]
+pub struct UtxoStandardWeak(UtxoWeak);
 
-#[derive(Debug, Deserialize)]
-struct UtxoMergeParams {
-    merge_at: usize,
-    #[serde(default = "ten_f64")]
-    check_every: f64,
-    #[serde(default = "one_hundred")]
-    max_merge_at_once: usize,
+impl WeakUpgradableCoin for UtxoStandardWeak {
+    type Target = UtxoStandardCoin;
+
+    fn upgrade(&self) -> Option<Self::Target> { self.0.upgrade().map(UtxoStandardCoin::from) }
 }
 
 pub async fn utxo_standard_coin_from_conf_and_request(
@@ -45,21 +44,9 @@ pub async fn utxo_standard_coin_from_conf_and_request(
     req: &Json,
     priv_key: &[u8],
 ) -> Result<UtxoStandardCoin, String> {
-    let inner = try_s!(utxo_common::utxo_arc_from_conf_and_request(ctx, ticker, conf, req, priv_key).await);
-    // TODO consider to move it into utxo_common.rs
-    let merge_params: Option<UtxoMergeParams> = try_s!(json::from_value(req["utxo_merge_params"].clone()));
-    if let Some(merge_params) = merge_params {
-        let weak = inner.downgrade();
-        let merge_loop = merge_utxo_loop(
-            weak,
-            merge_params.merge_at,
-            merge_params.check_every,
-            merge_params.max_merge_at_once,
-        );
-        info!("Starting UTXO merge loop for coin {}", ticker);
-        spawn(merge_loop);
-    }
-    Ok(inner.into())
+    let coin: UtxoStandardCoin =
+        try_s!(utxo_common::utxo_arc_from_conf_and_request(ctx, ticker, conf, req, priv_key).await);
+    Ok(coin)
 }
 
 // if mockable is placed before async_trait there is `munmap_chunk(): invalid pointer` error on async fn mocking attempt
@@ -437,47 +424,4 @@ impl MmCoin for UtxoStandardCoin {
     }
 
     fn swap_contract_address(&self) -> Option<BytesJson> { utxo_common::swap_contract_address() }
-}
-
-async fn merge_utxo_loop(weak: Weak<UtxoCoinFields>, merge_at: usize, check_every: f64, max_merge_at_once: usize) {
-    loop {
-        Timer::sleep(check_every).await;
-
-        let arc = match weak.upgrade() {
-            Some(a) => a,
-            None => break,
-        };
-        let coin: UtxoStandardCoin = UtxoArc(arc).into();
-
-        let ticker = &coin.as_ref().ticker;
-        let (unspents, recently_spent) = match coin.list_unspent_ordered(&coin.as_ref().my_address).await {
-            Ok((unspents, recently_spent)) => (unspents, recently_spent),
-            Err(e) => {
-                error!("Error {} on list_unspent_ordered of coin {}", e, ticker);
-                continue;
-            },
-        };
-        if unspents.len() >= merge_at {
-            let unspents: Vec<_> = unspents.into_iter().take(max_merge_at_once).collect();
-            info!("Trying to merge {} UTXOs of coin {}", unspents.len(), ticker);
-            let value = unspents.iter().fold(0, |sum, unspent| sum + unspent.value);
-            let script_pubkey = Builder::build_p2pkh(&coin.as_ref().my_address.hash).to_bytes();
-            let output = TransactionOutput { value, script_pubkey };
-            let merge_tx_fut = generate_and_send_tx(
-                &coin,
-                unspents,
-                vec![output],
-                FeePolicy::DeductFromOutput(0),
-                recently_spent,
-            );
-            match merge_tx_fut.await {
-                Ok(tx) => info!(
-                    "UTXO merge successful for coin {}, tx_hash {:?}",
-                    ticker,
-                    tx.hash().reversed()
-                ),
-                Err(e) => error!("Error {} on UTXO merge attempt for coin {}", e, ticker),
-            }
-        }
-    }
 }

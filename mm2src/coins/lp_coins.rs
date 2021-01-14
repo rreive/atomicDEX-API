@@ -509,6 +509,20 @@ pub trait MmCoin: SwapOps + MarketCoinOps + fmt::Debug + Send + Sync + 'static {
     fn swap_contract_address(&self) -> Option<BytesJson>;
 }
 
+/// A weak pointer wrapper that can be upgraded to the [`Self::Target`].
+pub trait WeakUpgradableCoin {
+    type Target: ArcDowngradableCoin;
+
+    fn upgrade(&self) -> Option<Self::Target>;
+}
+
+/// An arc pointer wrapper that can be downgraded to the [`Self::Target`].
+pub trait ArcDowngradableCoin {
+    type Target: WeakUpgradableCoin;
+
+    fn downgrade(&self) -> Self::Target;
+}
+
 #[derive(Clone, Debug)]
 pub enum MmCoinEnum {
     UtxoCoin(UtxoStandardCoin),
