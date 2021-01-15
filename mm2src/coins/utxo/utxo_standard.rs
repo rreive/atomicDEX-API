@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ArcDowngradableCoin, SwapOps, ValidateAddressResult, WeakUpgradableCoin};
+use crate::{SwapOps, ValidateAddressResult};
 use common::mm_metrics::MetricsArc;
 use futures::{FutureExt, TryFutureExt};
 
@@ -18,23 +18,6 @@ impl From<UtxoArc> for UtxoStandardCoin {
 
 impl From<UtxoStandardCoin> for UtxoArc {
     fn from(coin: UtxoStandardCoin) -> Self { coin.utxo_arc }
-}
-
-impl ArcDowngradableCoin for UtxoStandardCoin {
-    type Target = UtxoStandardWeak;
-    fn downgrade(&self) -> Self::Target {
-        let weak = self.utxo_arc.downgrade();
-        UtxoStandardWeak(weak)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct UtxoStandardWeak(UtxoWeak);
-
-impl WeakUpgradableCoin for UtxoStandardWeak {
-    type Target = UtxoStandardCoin;
-
-    fn upgrade(&self) -> Option<Self::Target> { self.0.upgrade().map(UtxoStandardCoin::from) }
 }
 
 pub async fn utxo_standard_coin_from_conf_and_request(

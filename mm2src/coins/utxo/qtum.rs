@@ -1,5 +1,5 @@
 use super::*;
-use crate::{eth, ArcDowngradableCoin, SwapOps, ValidateAddressResult, WeakUpgradableCoin};
+use crate::{eth, SwapOps, ValidateAddressResult};
 use common::mm_metrics::MetricsArc;
 use ethereum_types::H160;
 use futures::{FutureExt, TryFutureExt};
@@ -108,23 +108,6 @@ impl From<UtxoArc> for QtumCoin {
 
 impl From<QtumCoin> for UtxoArc {
     fn from(coin: QtumCoin) -> Self { coin.utxo_arc }
-}
-
-impl ArcDowngradableCoin for QtumCoin {
-    type Target = QtumWeak;
-    fn downgrade(&self) -> Self::Target {
-        let weak = self.utxo_arc.downgrade();
-        QtumWeak(weak)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct QtumWeak(UtxoWeak);
-
-impl WeakUpgradableCoin for QtumWeak {
-    type Target = QtumCoin;
-
-    fn upgrade(&self) -> Option<Self::Target> { self.0.upgrade().map(QtumCoin::from) }
 }
 
 pub async fn qtum_coin_from_conf_and_request(
