@@ -117,7 +117,7 @@ mod docker_tests {
         // skip Docker containers initialization if we are intended to run test_mm_start only
         if std::env::var("_MM2_TEST_CONF").is_err() {
             pull_docker_image(UTXO_ASSET_DOCKER_IMAGE);
-            pull_docker_image(QTUM_REGTEST_DOCKER_IMAGE);
+            // pull_docker_image(QTUM_REGTEST_DOCKER_IMAGE);
             remove_docker_containers(UTXO_ASSET_DOCKER_IMAGE);
             remove_docker_containers(QTUM_REGTEST_DOCKER_IMAGE);
 
