@@ -71,7 +71,8 @@ mod docker_tests {
     use coins::utxo::{coin_daemon_data_dir, dhash160, zcash_params_path, UtxoCoinFields, UtxoCommonOps};
     use coins::{FoundSwapTxSpend, MarketCoinOps, MmCoin, SwapOps, TransactionEnum};
     use common::block_on;
-    use common::for_tests::enable_electrum;
+    use common::for_tests::{check_my_swap_status, enable_electrum, MAKER_ERROR_EVENTS, MAKER_SUCCESS_EVENTS,
+                            TAKER_ERROR_EVENTS, TAKER_SUCCESS_EVENTS};
     use common::mm_number::MmNumber;
     use common::{file_lock::FileLock,
                  for_tests::{enable_native, mm_dump, new_mm2_temp_folder_path, MarketMakerIt},
@@ -1059,8 +1060,9 @@ mod docker_tests {
     // https://github.com/KomodoPlatform/atomicDEX-API/issues/471
     #[test]
     fn test_match_and_trade_max() {
-        let (_ctx, _, bob_priv_key) = generate_coin_with_random_privkey("MYCOIN", 1000.into());
-        let (_ctx, _, alice_priv_key) = generate_coin_with_random_privkey("MYCOIN1", 2000.into());
+        let balance: BigDecimal = "22350.78678769".parse().unwrap();
+        let (_ctx, _, bob_priv_key) = generate_coin_with_random_privkey("MYCOIN", balance.clone());
+        let (_ctx, _, alice_priv_key) = generate_coin_with_random_privkey("MYCOIN1", balance * BigDecimal::from(2));
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -1130,7 +1132,7 @@ mod docker_tests {
         log!("orderbook "[bob_orderbook]);
         let asks = bob_orderbook["asks"].as_array().unwrap();
         assert_eq!(asks.len(), 1, "MYCOIN/MYCOIN1 orderbook must have exactly 1 ask");
-        assert_eq!(asks[0]["maxvolume"], Json::from("999.99999"));
+        assert_eq!(asks[0]["maxvolume"], Json::from("22350.78677769"));
 
         let rc = unwrap!(block_on(mm_alice.rpc(json! ({
             "userpass": mm_alice.userpass,
@@ -1138,9 +1140,11 @@ mod docker_tests {
             "base": "MYCOIN",
             "rel": "MYCOIN1",
             "price": 1,
-            "volume": "999.99999",
+            "volume": "22350.78677769",
         }))));
         assert!(rc.0.is_success(), "!buy: {}", rc.1);
+        let json: Json = json::from_str(&rc.1).unwrap();
+        let swap_uuid = json["result"]["uuid"].as_str().unwrap().to_owned();
 
         unwrap!(block_on(mm_bob.wait_for_log(22., |log| {
             log.contains("Entering the maker_swap_loop MYCOIN/MYCOIN1")
@@ -1149,8 +1153,28 @@ mod docker_tests {
             log.contains("Entering the taker_swap_loop MYCOIN/MYCOIN1")
         })));
 
-        thread::sleep(Duration::from_secs(3));
+        block_on(mm_bob.wait_for_log(600., |log| log.contains(&format!("[swap uuid={}] Finished", swap_uuid))))
+            .unwrap();
+        block_on(mm_alice.wait_for_log(600., |log| log.contains(&format!("[swap uuid={}] Finished", swap_uuid))))
+            .unwrap();
 
+        let volume: BigDecimal = "22350.78677769".parse().unwrap();
+        block_on(check_my_swap_status(
+            &mm_bob,
+            &swap_uuid,
+            &MAKER_SUCCESS_EVENTS,
+            &MAKER_ERROR_EVENTS,
+            volume.clone(),
+            volume.clone(),
+        ));
+        block_on(check_my_swap_status(
+            &mm_alice,
+            &swap_uuid,
+            &TAKER_SUCCESS_EVENTS,
+            &TAKER_ERROR_EVENTS,
+            volume.clone(),
+            volume.clone(),
+        ));
         let rmd160 = rmd160_from_priv(bob_priv_key);
         let order_path = mm_bob.folder.join(format!(
             "DB/{}/ORDERS/MY/MAKER/{}.json",
