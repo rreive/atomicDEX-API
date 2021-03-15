@@ -593,6 +593,7 @@ mod tests {
     use super::*;
     use crate::block_on;
     use crate::log::LogState;
+    use metrics_runtime::Measurement;
 
     #[test]
     fn test_initialization() {
@@ -696,6 +697,13 @@ mod tests {
                    "coin" => "KMD",
                    "method" => "blockchain.transaction.get");
 
+        let snapshot = metrics.0.try_receiver().unwrap().controller().snapshot();
+        for (key, measurement) in snapshot.into_measurements() {
+            if let Measurement::Histogram(hist) = measurement {
+                log!("Histogram "(key)" len "(hist.len()));
+            }
+        }
+
         let expected = json!({
             "metrics": [
                 {
@@ -740,7 +748,6 @@ mod tests {
         });
 
         let mut actual = metrics.collect_json().unwrap();
-        log!("collect_json() "[actual]);
 
         let actual = actual["metrics"].as_array_mut().unwrap();
         for expected in expected["metrics"].as_array().unwrap() {
