@@ -319,6 +319,7 @@ impl Observer for JsonObserver {
 
     fn observe_histogram(&mut self, key: Key, values: &[u64]) {
         let (key, labels) = key.into_parts();
+        log!("observe_histogram() key = "(key)", values: "[values]);
 
         // Use default significant figures value.
         // For more info on `sigfig` see the Historgam::new_with_bounds().
@@ -739,6 +740,7 @@ mod tests {
         });
 
         let mut actual = metrics.collect_json().unwrap();
+        log!("collect_json() "[actual]);
 
         let actual = actual["metrics"].as_array_mut().unwrap();
         for expected in expected["metrics"].as_array().unwrap() {
