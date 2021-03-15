@@ -35,19 +35,20 @@ jobs:
           mkdir upload
           echo 2.1.$(Build.BuildId)_$(Build.SourceBranchName)_$(COMMIT_HASH)_$(Agent.OS)_Release > MM_VERSION
           cat MM_VERSION
-          cargo build --release --bin mm2
+#          cargo build --release --bin mm2
         displayName: 'Build MM2 Release'
-      - bash: |
-          cargo test --target wasm32-unknown-unknown --release --bin mm2
-        displayName: 'Test MM2 WASM'
-        condition: eq( variables['Agent.OS'], 'Linux' )
-        env:
-          WASM_BINDGEN_TEST_TIMEOUT: 120
-          GECKODRIVER: '/home/azureagent/wasm/geckodriver'
+#      - bash: |
+#          cargo test --target wasm32-unknown-unknown --release --bin mm2
+#        displayName: 'Test MM2 WASM'
+#        condition: eq( variables['Agent.OS'], 'Linux' )
+#        env:
+#          WASM_BINDGEN_TEST_TIMEOUT: 120
+#          GECKODRIVER: '/home/azureagent/wasm/geckodriver'
       # Explicit --test-threads=16 makes testing process slightly faster on agents that have <16 CPU cores.
       - bash: |
           cargo test --all -- --test-threads=16
         displayName: 'Test MM2'
+        condition: eq( variables['Agent.OS'], 'Windows_NT' )
         timeoutInMinutes: 22
         env:
           BOB_PASSPHRASE: $(${{ parameters.bob_passphrase }})
@@ -55,34 +56,34 @@ jobs:
           ALICE_PASSPHRASE: $(${{ parameters.alice_passphrase }})
           ALICE_USERPASS: $(${{ parameters.alice_userpass }})
           RUST_LOG: debug
-      - bash: |
-          cargo clippy -- -D warnings
-        displayName: 'Check Clippy warnings'
-        condition: eq( variables['Agent.OS'], 'Linux' )
-      - bash: |
-          cargo fmt -- --check
-        displayName: 'Check rustfmt warnings'
-        condition: eq( variables['Agent.OS'], 'Linux' )
-      - bash: |
-          zip upload/mm2-$(COMMIT_HASH)-$(Agent.OS)-Release target/release/mm2 -j
-        displayName: 'Prepare release build upload Linux'
-        condition: eq( variables['Agent.OS'], 'Linux' )
-      - bash: |
-          cd target/release
-          zip ../../upload/mm2-$(COMMIT_HASH)-$(Agent.OS)-Release mm2.dSYM mm2 -r
-        displayName: 'Prepare release build upload MacOS'
-        condition: eq( variables['Agent.OS'], 'Darwin' )
-      - powershell: |
-          7z a .\upload\mm2-$(COMMIT_HASH)-$(Agent.OS)-Release.zip .\target\release\mm2.exe .\target\release\*.dll "$Env:windir\system32\msvcr100.dll" "$Env:windir\system32\msvcp140.dll" "$Env:windir\system32\vcruntime140.dll"
-        displayName: 'Prepare release build upload Windows'
-        condition: eq( variables['Agent.OS'], 'Windows_NT' )
-      # https://docs.microsoft.com/en-us/azure/devops/pipelines/tasks/deploy/copy-files-over-ssh?view=vsts
-      - task: CopyFilesOverSSH@0
-        inputs:
-          sshEndpoint: nightly_build_server
-          sourceFolder: 'upload' # Optional
-          contents: "**"
-          targetFolder: "uploads/$(Build.SourceBranchName)" # Optional
-          overwrite: true
-        displayName: 'Upload nightly'
-        condition: ne(variables['build.sourceBranch'], 'refs/heads/mm2')
+#      - bash: |
+#          cargo clippy -- -D warnings
+#        displayName: 'Check Clippy warnings'
+#        condition: eq( variables['Agent.OS'], 'Linux' )
+#      - bash: |
+#          cargo fmt -- --check
+#        displayName: 'Check rustfmt warnings'
+#        condition: eq( variables['Agent.OS'], 'Linux' )
+#      - bash: |
+#          zip upload/mm2-$(COMMIT_HASH)-$(Agent.OS)-Release target/release/mm2 -j
+#        displayName: 'Prepare release build upload Linux'
+#        condition: eq( variables['Agent.OS'], 'Linux' )
+#      - bash: |
+#          cd target/release
+#          zip ../../upload/mm2-$(COMMIT_HASH)-$(Agent.OS)-Release mm2.dSYM mm2 -r
+#        displayName: 'Prepare release build upload MacOS'
+#        condition: eq( variables['Agent.OS'], 'Darwin' )
+#      - powershell: |
+#          7z a .\upload\mm2-$(COMMIT_HASH)-$(Agent.OS)-Release.zip .\target\release\mm2.exe .\target\release\*.dll "$Env:windir\system32\msvcr100.dll" "$Env:windir\system32\msvcp140.dll" "$Env:windir\system32\vcruntime140.dll"
+#        displayName: 'Prepare release build upload Windows'
+#        condition: eq( variables['Agent.OS'], 'Windows_NT' )
+#      # https://docs.microsoft.com/en-us/azure/devops/pipelines/tasks/deploy/copy-files-over-ssh?view=vsts
+#      - task: CopyFilesOverSSH@0
+#        inputs:
+#          sshEndpoint: nightly_build_server
+#          sourceFolder: 'upload' # Optional
+#          contents: "**"
+#          targetFolder: "uploads/$(Build.SourceBranchName)" # Optional
+#          overwrite: true
+#        displayName: 'Upload nightly'
+#        condition: ne(variables['build.sourceBranch'], 'refs/heads/mm2')
