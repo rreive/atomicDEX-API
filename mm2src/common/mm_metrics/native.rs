@@ -701,6 +701,7 @@ mod tests {
         for (key, measurement) in snapshot.into_measurements() {
             if let Measurement::Histogram(hist) = measurement {
                 log!("Histogram "(key)" len "(hist.len()));
+                hist.decompress_with(|h| log!("Decompressed histogram "(key)" hist "[h]" len "(h.len())));
             }
         }
 
