@@ -296,6 +296,7 @@ struct JsonObserver {
 
 impl Observer for JsonObserver {
     fn observe_counter(&mut self, key: Key, value: u64) {
+        log!("observe_counter() key = "(key)", value: "[value]);
         let (key, labels) = key.into_parts();
 
         let metric = MetricType::Counter {
@@ -308,6 +309,7 @@ impl Observer for JsonObserver {
     }
 
     fn observe_gauge(&mut self, key: Key, value: i64) {
+        log!("observe_gauge() key = "(key)", value: "[value]);
         let (key, labels) = key.into_parts();
 
         let metric = MetricType::Gauge {
