@@ -3,7 +3,7 @@ use crate::executor::{spawn, Timer};
 use hdrhistogram::Histogram;
 use itertools::Itertools;
 use metrics_core::{Builder, Drain, Key, Label, Observe, Observer, ScopedString};
-use metrics_runtime::{observers::PrometheusBuilder, Receiver};
+use metrics_runtime::{observers::PrometheusBuilder, Controller, Receiver};
 use metrics_util::{parse_quantiles, Quantile};
 use std::collections::HashMap;
 use std::fmt::Write as WriteFmt;
@@ -137,6 +137,8 @@ impl MetricsOps for Metrics {
         let controller = receiver.controller();
 
         let mut observer = JsonObserver::new(QUANTILES);
+
+        display_metrics_snapshot(&controller);
 
         controller.observe(&mut observer);
 
@@ -588,12 +590,22 @@ pub mod prometheus {
     }
 }
 
+fn display_metrics_snapshot(controller: &Controller) {
+    use metrics_runtime::Measurement;
+    let snapshot = controller.snapshot();
+    for (key, measurement) in snapshot.into_measurements() {
+        if let Measurement::Histogram(hist) = measurement {
+            log!("Histogram "(key)" len "(hist.len()));
+            hist.decompress_with(|h| log!("Decompressed histogram "(key)" hist "[h]" len "(h.len())));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::block_on;
     use crate::log::LogState;
-    use metrics_runtime::Measurement;
 
     #[test]
     fn test_initialization() {
@@ -697,13 +709,7 @@ mod tests {
                    "coin" => "KMD",
                    "method" => "blockchain.transaction.get");
 
-        let snapshot = metrics.0.try_receiver().unwrap().controller().snapshot();
-        for (key, measurement) in snapshot.into_measurements() {
-            if let Measurement::Histogram(hist) = measurement {
-                log!("Histogram "(key)" len "(hist.len()));
-                hist.decompress_with(|h| log!("Decompressed histogram "(key)" hist "[h]" len "(h.len())));
-            }
-        }
+        display_metrics_snapshot(&metrics.0.try_receiver().unwrap().controller());
 
         let expected = json!({
             "metrics": [
