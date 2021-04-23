@@ -44,13 +44,13 @@ use futures::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use futures::stream::StreamExt;
 use futures01::Future;
 use keys::bytes::Bytes;
-pub use keys::{Address, KeyPair, Private, Public, Secret};
+pub use keys::{Address, AddressHash, KeyPair, Private, Public, Secret};
 #[cfg(test)] use mocktopus::macros::*;
 use num_traits::ToPrimitive;
 use primitives::hash::{H256, H264, H512};
 use rand::seq::SliceRandom;
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
-use script::{Builder, Script, SignatureVersion, TransactionInputSigner};
+use script::{Builder, Opcode, Script, Sighash, SignatureVersion, TransactionInputSigner};
 use serde_json::{self as json, Value as Json};
 use serialization::serialize;
 use std::collections::{HashMap, HashSet};
@@ -74,7 +74,7 @@ use super::{CoinTransportMetrics, CoinsContext, FeeApproxStage, FoundSwapTxSpend
             MmCoin, RpcClientType, RpcTransportEventHandler, RpcTransportEventHandlerShared, TradeFee,
             TradePreimageError, Transaction, TransactionDetails, TransactionEnum, TransactionFut, WithdrawFee,
             WithdrawRequest};
-
+use crate::account::AccountAddressType;
 #[cfg(test)] pub mod utxo_tests;
 
 const SWAP_TX_SPEND_SIZE: u64 = 305;
@@ -91,6 +91,7 @@ const UTXO_DUST_AMOUNT: u64 = 1000;
 /// 11 > 0
 const KMD_MTP_BLOCK_COUNT: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(11u64) };
 const DEFAULT_DYNAMIC_FEE_VOLATILITY_PERCENT: f64 = 0.5;
+const DEFAULT_SUPPORTED_SEGWIT: u32 = 49;
 
 #[cfg(windows)]
 #[cfg(not(target_arch = "wasm32"))]
@@ -336,11 +337,12 @@ pub struct UtxoCoinConf {
     /// Overwinter and then Sapling upgrades
     /// https://github.com/zcash/zips/blob/master/zip-0243.rst
     pub tx_version: i32,
-    /// If true - allow coins withdraw to P2SH addresses (Segwit).
-    /// the flag will also affect the address that MM2 generates by default in the future
+    /// allows coins withdraw to P2SH addresses (Segwit).
     /// will be the Segwit (starting from 3 for BTC case) instead of legacy
     /// https://en.bitcoin.it/wiki/Segregated_Witness
-    pub segwit: bool,
+    pub segwit: u32,
+    // affect the address that MM2 generates by default
+    pub account_address_type: AccountAddressType,
     /// Does coin require transactions to be notarized to be considered as confirmed?
     /// https://komodoplatform.com/security-delayed-proof-of-work-dpow/
     pub requires_notarization: AtomicBool,
@@ -362,7 +364,7 @@ pub struct UtxoCoinConf {
     pub checksum_type: ChecksumType,
     /// Fork id used in sighash
     pub fork_id: u32,
-    /// Signature version
+    /// Signature version (deprecated)
     pub signature_version: SignatureVersion,
     pub required_confirmations: AtomicU64,
     /// if set to true MM2 will check whether calculated fee is lower than relay fee and use
@@ -778,6 +780,7 @@ impl<'a> UtxoConfBuilder<'a> {
 
         let is_pos = self.is_pos();
         let segwit = self.segwit();
+        let account_address_type = self.account_address_type();
         let force_min_relay_fee = self.conf["force_min_relay_fee"].as_bool().unwrap_or(false);
         let mtp_block_count = self.mtp_block_count();
         let estimate_fee_mode = self.estimate_fee_mode();
@@ -793,6 +796,7 @@ impl<'a> UtxoConfBuilder<'a> {
             pub_t_addr_prefix,
             p2sh_t_addr_prefix,
             segwit,
+            account_address_type,
             wif_prefix,
             tx_version,
             address_format,
@@ -948,7 +952,26 @@ impl<'a> UtxoConfBuilder<'a> {
 
     fn is_pos(&self) -> bool { self.conf["isPoS"].as_u64() == Some(1) }
 
-    fn segwit(&self) -> bool { self.conf["segwit"].as_bool().unwrap_or(false) }
+    fn segwit(&self) -> u32 {
+        self.req["full_segwit"].as_u64().map(|v| v as u32).unwrap_or(
+            self.conf["segwit"]
+                .as_u64()
+                .map(|v| v as u32)
+                .unwrap_or(DEFAULT_SUPPORTED_SEGWIT),
+        )
+    }
+
+    fn account_address_type(&self) -> AccountAddressType {
+        self.req["account_type"]
+            .as_u64()
+            .map(|v| AccountAddressType::from_u32(v as u32))
+            .unwrap_or(
+                self.conf["account_type"]
+                    .as_u64()
+                    .map(|v| AccountAddressType::from_u32(v as u32))
+                    .unwrap_or(AccountAddressType::default()),
+            )
+    }
 
     fn mtp_block_count(&self) -> NonZeroU64 {
         json::from_value(self.conf["mtp_block_count"].clone()).unwrap_or(KMD_MTP_BLOCK_COUNT)
@@ -987,12 +1010,7 @@ pub trait UtxoCoinBuilder {
             checksum_type: conf.checksum_type,
         };
         let key_pair = try_s!(KeyPair::from_private(private));
-        let my_address = Address {
-            prefix: conf.pub_addr_prefix,
-            t_addr_prefix: conf.pub_t_addr_prefix,
-            hash: key_pair.public().address_hash(),
-            checksum_type: conf.checksum_type,
-        };
+        let my_address = try_s!(address::build_address(key_pair.public(), &conf));
         let my_script_pubkey = Builder::build_p2pkh(&my_address.hash).to_bytes();
         let rpc_client = try_s!(self.rpc_client().await);
         let tx_fee = try_s!(self.tx_fee(&rpc_client).await);
@@ -1506,7 +1524,7 @@ pub fn sat_from_big_decimal(amount: &BigDecimal, decimals: u8) -> Result<u64, St
         ))
 }
 
-pub(crate) fn sign_tx(
+pub(crate) fn p2pkh_sign_tx(
     unsigned: TransactionInputSigner,
     key_pair: &KeyPair,
     prev_script: Script,
@@ -1523,6 +1541,36 @@ pub(crate) fn sign_tx(
             signature_version,
             fork_id
         )));
+    }
+    Ok(UtxoTx {
+        inputs: signed_inputs,
+        n_time: unsigned.n_time,
+        outputs: unsigned.outputs.clone(),
+        version: unsigned.version,
+        overwintered: unsigned.overwintered,
+        lock_time: unsigned.lock_time,
+        expiry_height: unsigned.expiry_height,
+        join_splits: vec![],
+        shielded_spends: vec![],
+        shielded_outputs: vec![],
+        value_balance: 0,
+        version_group_id: unsigned.version_group_id,
+        binding_sig: H512::default(),
+        join_split_sig: H512::default(),
+        join_split_pubkey: H256::default(),
+        zcash: unsigned.zcash,
+        str_d_zeel: unsigned.str_d_zeel,
+        tx_hash_algo: unsigned.hash_algo.into(),
+    })
+}
+
+pub(crate) fn sign_tx<T>(unsigned: TransactionInputSigner, coin: &T) -> Result<UtxoTx, String>
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    let mut signed_inputs = vec![];
+    for (i, _) in unsigned.inputs.iter().enumerate() {
+        signed_inputs.push(try_s!(spend(&unsigned, i, coin)));
     }
     Ok(UtxoTx {
         inputs: signed_inputs,
@@ -1580,14 +1628,8 @@ where
         })
         .collect();
 
-    let prev_script = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
-    let signed = try_s!(sign_tx(
-        unsigned,
-        &coin.as_ref().key_pair,
-        prev_script,
-        coin.as_ref().conf.signature_version,
-        coin.as_ref().conf.fork_id
-    ));
+    // let prev_script = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
+    let signed = try_s!(sign_tx(unsigned, coin));
 
     try_s!(
         coin.as_ref()
@@ -1601,6 +1643,119 @@ where
     recently_spent.add_spent(spent_unspents, signed.hash(), signed.outputs.clone());
 
     Ok(signed)
+}
+
+/// Creates signed input spending output
+fn spend<T>(signer: &TransactionInputSigner, input_index: usize, coin: &T) -> Result<TransactionInput, String>
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    let key_pair = &coin.as_ref().key_pair;
+    match coin.as_ref().conf.account_address_type {
+        AccountAddressType::P2PKH => {
+            let script = Builder::build_p2pkh(&key_pair.public().address_hash());
+            let fork_id = coin.as_ref().conf.fork_id;
+            let sighash_type = 1 | fork_id;
+            let signature_version = if coin.as_ref().conf.ticker == "BCH" {
+                SignatureVersion::ForkId
+            } else {
+                SignatureVersion::Base
+            };
+            let sighash = signer.signature_hash(
+                input_index,
+                signer.inputs[input_index].amount,
+                &script,
+                signature_version,
+                Sighash::from_u32(signature_version, sighash_type),
+            );
+            let script_sig = try_s!(script_sig_with_pub(&sighash, key_pair, fork_id));
+
+            Ok(TransactionInput {
+                script_sig,
+                sequence: signer.inputs[input_index].sequence,
+                script_witness: vec![],
+                previous_output: signer.inputs[input_index].previous_output.clone(),
+            })
+        },
+        AccountAddressType::P2WPKH => {
+            let script_sig = Builder::default().into_script().to_bytes();
+            let sighash_type = 1;
+            let script_code = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
+            let sighash = signer.signature_hash(
+                input_index,
+                signer.inputs[input_index].amount,
+                &script_code,
+                SignatureVersion::WitnessV0,
+                Sighash::from_u32(SignatureVersion::WitnessV0, sighash_type),
+            );
+            let mut with_hashtype = Bytes::from(try_s!(key_pair.private().sign(&sighash)).as_ref());
+            with_hashtype.push(sighash_type as u8);
+            let mut script_witness = Vec::new();
+
+            script_witness.push(with_hashtype);
+            script_witness.push(Bytes::from(key_pair.public().as_ref()));
+            Ok(TransactionInput {
+                script_sig,
+                sequence: signer.inputs[input_index].sequence,
+                script_witness,
+                previous_output: signer.inputs[input_index].previous_output.clone(),
+            })
+        },
+        AccountAddressType::P2SHWPKH => {
+            let script_sig = Builder::default()
+                .push_opcode(Opcode::from_u8(0u8).expect("zero present"))
+                .push_bytes(&key_pair.public().address_hash()[..])
+                .into_script()
+                .to_bytes();
+            let sighash_type = 1;
+            let script_code = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
+            let sighash = signer.signature_hash(
+                input_index,
+                signer.inputs[input_index].amount,
+                &script_code,
+                SignatureVersion::WitnessV0,
+                Sighash::from_u32(SignatureVersion::WitnessV0, sighash_type),
+            );
+
+            let mut with_hashtype = Bytes::from(try_s!(key_pair.private().sign(&sighash)).as_ref());
+            with_hashtype.push(sighash_type as u8);
+            let mut script_witness = Vec::new();
+
+            script_witness.push(with_hashtype);
+            script_witness.push(Bytes::from(key_pair.public().as_ref()));
+            Ok(TransactionInput {
+                script_sig,
+                sequence: signer.inputs[input_index].sequence,
+                script_witness,
+                previous_output: signer.inputs[input_index].previous_output.clone(),
+            })
+        },
+        AccountAddressType::P2WSH(_) => {
+            let script_sig = Builder::default().into_script().to_bytes();
+            let script_code = Builder::default().into_script();
+            let sighash_type = 1;
+            let sighash = signer.signature_hash(
+                input_index,
+                signer.inputs[input_index].amount,
+                &script_code,
+                SignatureVersion::WitnessV0,
+                Sighash::from_u32(SignatureVersion::WitnessV0, sighash_type),
+            );
+
+            let mut with_hashtype = Bytes::from(try_s!(key_pair.private().sign(&sighash)).as_ref());
+            with_hashtype.push(sighash_type as u8);
+            let mut script_witness = Vec::new();
+            script_witness.push(with_hashtype);
+            script_witness.push(script_code.to_bytes());
+
+            Ok(TransactionInput {
+                script_sig,
+                sequence: signer.inputs[input_index].sequence,
+                script_witness,
+                previous_output: signer.inputs[input_index].previous_output.clone(),
+            })
+        },
+    }
 }
 
 /// Creates signed input spending p2pkh output
@@ -1626,7 +1781,7 @@ fn p2pkh_spend(
         signer.inputs[input_index].amount,
         &script,
         signature_version,
-        sighash_type,
+        Sighash::from_u32(signature_version, sighash_type),
     );
 
     let script_sig = try_s!(script_sig_with_pub(&sighash, key_pair, fork_id));
