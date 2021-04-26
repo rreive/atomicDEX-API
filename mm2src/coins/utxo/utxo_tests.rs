@@ -1,5 +1,6 @@
 use super::rpc_clients::{ElectrumProtocol, ListSinceBlockRes, NetworkInfo};
 use super::*;
+use crate::utxo;
 use crate::utxo::qtum::{qtum_coin_from_conf_and_request, QtumCoin};
 use crate::utxo::rpc_clients::{GetAddressInfoRes, UtxoRpcClientOps, ValidateAddressRes, VerboseBlock};
 use crate::utxo::utxo_common::{generate_transaction, UtxoArcBuilder};
@@ -14,6 +15,7 @@ use common::{block_on, OrdRange, DEX_FEE_ADDR_RAW_PUBKEY};
 use futures::future::join_all;
 use gstuff::now_ms;
 use mocktopus::mocking::*;
+use num_traits::Zero;
 use rpc::v1::types::H256 as H256Json;
 use serialization::deserialize;
 use std::thread;
