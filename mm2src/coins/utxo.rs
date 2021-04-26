@@ -19,6 +19,7 @@
 //  Copyright © 2017-2019 SuperNET. All rights reserved.
 //
 
+pub mod address;
 pub mod qtum;
 pub mod rpc_clients;
 pub mod utxo_common;

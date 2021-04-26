@@ -153,3 +153,15 @@ members = [
 backtrace = { git = "https://github.com/artemii235/backtrace-rs.git" }
 backtrace-sys = { git = "https://github.com/artemii235/backtrace-rs.git" }
 num-rational = { git = "https://github.com/artemii235/num-rational.git" }
+
+[patch."https://github.com/artemii235/parity-bitcoin.git"]
+bitcrypto = { git = "https://github.com/mmacedoeu/parity-bitcoin.git", branch="segwit" }
+chain = { git = "https://github.com/mmacedoeu/parity-bitcoin.git", branch="segwit" }
+keys = { git = "https://github.com/mmacedoeu/parity-bitcoin.git", branch="segwit" }
+rpc = { git = "https://github.com/mmacedoeu/parity-bitcoin.git", branch="segwit" }
+primitives = { git = "https://github.com/mmacedoeu/parity-bitcoin.git", branch="segwit" }
+script = { git = "https://github.com/mmacedoeu/parity-bitcoin.git", branch="segwit"}
+serialization = { git = "https://github.com/mmacedoeu/parity-bitcoin.git", branch="segwit" }
+serialization_derive = { git = "https://github.com/mmacedoeu/parity-bitcoin.git", branch="segwit" }
+
+
