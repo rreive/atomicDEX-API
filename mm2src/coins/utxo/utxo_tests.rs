@@ -1,6 +1,6 @@
 use super::rpc_clients::{ElectrumProtocol, ListSinceBlockRes, NetworkInfo};
 use super::*;
-use crate::utxo;
+use crate::utxo::{self, utxo_common::list_unspent_ordered};
 use crate::utxo::qtum::{qtum_coin_from_conf_and_request, QtumCoin};
 use crate::utxo::rpc_clients::{GetAddressInfoRes, UtxoRpcClientOps, ValidateAddressRes, VerboseBlock};
 use crate::utxo::utxo_common::{generate_transaction, UtxoArcBuilder};
@@ -1227,10 +1227,10 @@ fn test_address_segwit_p2_s_h_w_p_k_h() {
     let balance = block_on(coin.my_balance().compat()).unwrap();
     log!([balance]);
 
-    let (unspents, _) = block_on(coin.ordered_mature_unspents(&coin.as_ref().my_address)).unwrap();
+    let (unspents, _recently_spent) = block_on(list_unspent_ordered(&coin, address)).unwrap();
     log!([unspents]);
 
-    assert!(balance.unspendable > BigDecimal::zero())
+    assert!(balance.spendable > BigDecimal::zero())
 }
 
 #[test]
@@ -1276,16 +1276,17 @@ fn test_spend_segwit_p2_s_h_w_p_k_h() {
     log!("addr: \t"(address));
 
     let balance = block_on(coin.my_balance().compat()).unwrap();
-    log!([balance]);
+    log!([balance]);   
 
-    // let target_addr = "tb1qm5tfegjevj27yvvna9elym9lnzcf0zraxgl8z2";
-
+    let redeem_script = address::build_redeem_script_address(&coin.as_ref().key_pair.public().address_hash()[..]);
+    
     let outputs = vec![TransactionOutput {
-        script_pubkey: Builder::build_p2pkh(&coin.as_ref().my_address.hash).to_bytes(),
-        value: 10,
+        script_pubkey: Builder::build_p2sh(&redeem_script).to_bytes(),
+        value: 1001,
     }];
 
-    let _ = block_on(send_outputs_from_my_address_impl(coin, outputs));
+    let tx = block_on(send_outputs_from_my_address_impl(coin, outputs)).unwrap();
+    log!("tx: \t"[tx]);
 
     assert!(true)
 }
@@ -1350,7 +1351,7 @@ fn test_withdraw_segwit_p2_s_h_w_p_k_h() {
 
     let _tx_details = coin.withdraw(withdraw_req).wait().unwrap();
 
-    assert!(balance.unspendable > BigDecimal::zero())
+    assert!(balance.spendable > BigDecimal::zero())
 }
 
 #[test]
@@ -1704,7 +1705,7 @@ fn test_ordered_mature_unspents_from_cache_impl(
     verbose.height = cached_height;
 
     // prepare mocks
-    ElectrumClient::list_unspent.mock_safe(move |_, _, _| {
+    ElectrumClient::list_unspent.mock_safe(move |_, _, _, _| {
         let unspents = vec![UnspentInfo {
             outpoint: OutPoint {
                 hash: H256::from_reversed_str(TX_HASH),
@@ -1898,7 +1899,7 @@ fn test_native_client_unspents_filtered_using_tx_cache_single_tx_in_cache() {
         tx.outputs.clone(),
     );
     NativeClient::list_unspent
-        .mock_safe(move |_, _, _| MockResult::Return(Box::new(futures01::future::ok(spent_by_tx.clone()))));
+        .mock_safe(move |_, _, _, _| MockResult::Return(Box::new(futures01::future::ok(spent_by_tx.clone()))));
 
     let address: Address = "RGfFZaaNV68uVe1uMf6Y37Y8E1i2SyYZBN".into();
     let (unspents_ordered, _) = block_on(coin.list_unspent_ordered(&address)).unwrap();
@@ -1993,7 +1994,7 @@ fn test_native_client_unspents_filtered_using_tx_cache_single_several_chained_tx
     unspents_to_return.extend(spent_by_tx_2);
 
     NativeClient::list_unspent
-        .mock_safe(move |_, _, _| MockResult::Return(Box::new(futures01::future::ok(unspents_to_return.clone()))));
+        .mock_safe(move |_, _, _, _| MockResult::Return(Box::new(futures01::future::ok(unspents_to_return.clone()))));
 
     let (unspents_ordered, _) = block_on(coin.list_unspent_ordered(&address)).unwrap();
 

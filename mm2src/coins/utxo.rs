@@ -1464,7 +1464,7 @@ where
 
     let utxo = coin.as_ref();
     let rpc_client = &utxo.rpc_client;
-    let mut unspents = try_s!(rpc_client.list_unspent(&utxo.my_address, utxo.decimals).compat().await);
+    let mut unspents = try_s!(rpc_client.list_unspent(&utxo.my_address, utxo.conf.account_address_type, utxo.decimals).compat().await);
     // list_unspent_ordered() returns ordered from lowest to highest by value unspent outputs.
     // reverse it to reorder from highest to lowest outputs.
     unspents.reverse();

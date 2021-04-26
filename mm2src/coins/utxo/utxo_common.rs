@@ -1222,7 +1222,7 @@ where
 pub fn my_balance(coin: &UtxoCoinFields) -> Box<dyn Future<Item = CoinBalance, Error = String> + Send> {
     Box::new(
         coin.rpc_client
-            .display_balance(coin.my_address.clone(), coin.decimals)
+            .display_balance(coin.my_address.clone(), coin.conf.account_address_type, coin.decimals)
             // at the moment standard UTXO coins do not have an unspendable balance
             .map(|spendable| CoinBalance {
                 spendable,
@@ -2527,7 +2527,7 @@ where
     let mut unspents = try_s!(
         coin.as_ref()
             .rpc_client
-            .list_unspent(address, decimals)
+            .list_unspent(address, coin.as_ref().conf.account_address_type, decimals)
             .map_err(|e| ERRL!("{}", e))
             .compat()
             .await
