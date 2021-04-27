@@ -1,4 +1,4 @@
-const DEFAULT_ACCOUNT_ADDRESS_TYPE : AccountAddressType = AccountAddressType::P2PKH;
+const DEFAULT_ACCOUNT_ADDRESS_TYPE: AccountAddressType = AccountAddressType::P2PKH;
 
 /// Address type an account is using
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
@@ -37,7 +37,5 @@ impl AccountAddressType {
 }
 
 impl Default for AccountAddressType {
-    fn default() -> Self {
-        DEFAULT_ACCOUNT_ADDRESS_TYPE
-    }
+    fn default() -> Self { DEFAULT_ACCOUNT_ADDRESS_TYPE }
 }

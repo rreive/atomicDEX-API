@@ -1390,7 +1390,7 @@ where
         coin.generate_transaction(unspents, outputs, fee_policy, fee, gas_fee)
             .await
     );
-    let prev_script = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
+    let _prev_script = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
     let signed = try_s!(sign_tx(unsigned, &coin,));
     let fee_amount = data.fee_amount + data.unused_change.unwrap_or_default();
     let fee_details = UtxoFeeDetails {

@@ -182,7 +182,12 @@ pub type UtxoRpcRes<T> = Box<dyn Future<Item = T, Error = String> + Send + 'stat
 
 /// Common operations that both types of UTXO clients have but implement them differently
 pub trait UtxoRpcClientOps: fmt::Debug + Send + Sync + 'static {
-    fn list_unspent(&self, address: &Address, account_type: AccountAddressType, decimals: u8) -> UtxoRpcRes<Vec<UnspentInfo>>;
+    fn list_unspent(
+        &self,
+        address: &Address,
+        account_type: AccountAddressType,
+        decimals: u8,
+    ) -> UtxoRpcRes<Vec<UnspentInfo>>;
 
     fn send_transaction(&self, tx: &UtxoTx) -> UtxoRpcRes<H256Json>;
 
@@ -515,7 +520,12 @@ impl JsonRpcClient for NativeClientImpl {
 
 #[cfg_attr(test, mockable)]
 impl UtxoRpcClientOps for NativeClient {
-    fn list_unspent(&self, address: &Address, account_type: AccountAddressType, decimals: u8) -> UtxoRpcRes<Vec<UnspentInfo>> {
+    fn list_unspent(
+        &self,
+        address: &Address,
+        _account_type: AccountAddressType,
+        decimals: u8,
+    ) -> UtxoRpcRes<Vec<UnspentInfo>> {
         let fut = self
             .list_unspent_impl(0, std::i32::MAX, vec![address.to_string()])
             .map_err(|e| ERRL!("{}", e))
@@ -554,7 +564,12 @@ impl UtxoRpcClientOps for NativeClient {
 
     fn get_block_count(&self) -> RpcRes<u64> { self.0.get_block_count() }
 
-    fn display_balance(&self, address: Address, _account_type: AccountAddressType, _decimals: u8) -> RpcRes<BigDecimal> {
+    fn display_balance(
+        &self,
+        address: Address,
+        _account_type: AccountAddressType,
+        _decimals: u8,
+    ) -> RpcRes<BigDecimal> {
         Box::new(
             self.list_unspent_impl(0, std::i32::MAX, vec![address.to_string()])
                 .map(|unspents| {
@@ -1521,12 +1536,17 @@ impl ElectrumClient {
 
 #[cfg_attr(test, mockable)]
 impl UtxoRpcClientOps for ElectrumClient {
-    fn list_unspent(&self, address: &Address, account_type: AccountAddressType, _decimals: u8) -> UtxoRpcRes<Vec<UnspentInfo>> {        
+    fn list_unspent(
+        &self,
+        address: &Address,
+        account_type: AccountAddressType,
+        _decimals: u8,
+    ) -> UtxoRpcRes<Vec<UnspentInfo>> {
         let script = match account_type {
-            AccountAddressType::P2PKH => { Builder::build_p2pkh(&address.hash)}
-            AccountAddressType::P2SHWPKH => { Builder::build_p2sh(&address.hash)}
-            AccountAddressType::P2WPKH => { unimplemented!()}
-            AccountAddressType::P2WSH(_) => { unimplemented!()}
+            AccountAddressType::P2PKH => Builder::build_p2pkh(&address.hash),
+            AccountAddressType::P2SHWPKH => Builder::build_p2sh(&address.hash),
+            AccountAddressType::P2WPKH => unimplemented!(),
+            AccountAddressType::P2WSH(_) => unimplemented!(),
         };
 
         let script_hash = electrum_script_hash(&script);
@@ -1574,17 +1594,13 @@ impl UtxoRpcClientOps for ElectrumClient {
 
     fn display_balance(&self, address: Address, account_type: AccountAddressType, decimals: u8) -> RpcRes<BigDecimal> {
         let hash = match account_type {
-            AccountAddressType::P2PKH => { electrum_script_hash(&Builder::build_p2pkh(&address.hash)) }
-            AccountAddressType::P2SHWPKH => {  
+            AccountAddressType::P2PKH => electrum_script_hash(&Builder::build_p2pkh(&address.hash)),
+            AccountAddressType::P2SHWPKH => {
                 let script = Builder::build_p2sh(&address.hash).to_bytes();
                 electrum_script_hash(&script[..])
-            }
-            AccountAddressType::P2WPKH => {
-                unimplemented!()
-            }
-            AccountAddressType::P2WSH(_) => {
-                unimplemented!()
-            }
+            },
+            AccountAddressType::P2WPKH => unimplemented!(),
+            AccountAddressType::P2WSH(_) => unimplemented!(),
         };
         let hash_str = hex::encode(hash);
         Box::new(self.scripthash_get_balance(&hash_str).map(move |result| {

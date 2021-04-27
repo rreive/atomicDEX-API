@@ -1,10 +1,10 @@
 use super::rpc_clients::{ElectrumProtocol, ListSinceBlockRes, NetworkInfo};
 use super::*;
-use crate::utxo::{self, utxo_common::list_unspent_ordered};
 use crate::utxo::qtum::{qtum_coin_from_conf_and_request, QtumCoin};
 use crate::utxo::rpc_clients::{GetAddressInfoRes, UtxoRpcClientOps, ValidateAddressRes, VerboseBlock};
 use crate::utxo::utxo_common::{generate_transaction, UtxoArcBuilder};
 use crate::utxo::utxo_standard::{utxo_standard_coin_from_conf_and_request, UtxoStandardCoin};
+use crate::utxo::{self, utxo_common::list_unspent_ordered};
 #[cfg(not(target_arch = "wasm32"))] use crate::WithdrawFee;
 use crate::{CoinBalance, SwapOps, TradePreimageValue};
 use bigdecimal::BigDecimal;
@@ -1234,6 +1234,7 @@ fn test_address_segwit_p2_s_h_w_p_k_h() {
 }
 
 #[test]
+#[ignore]
 fn test_spend_segwit_p2_s_h_w_p_k_h() {
     let config = json!({
         "coin": "tBTC",
@@ -1276,10 +1277,10 @@ fn test_spend_segwit_p2_s_h_w_p_k_h() {
     log!("addr: \t"(address));
 
     let balance = block_on(coin.my_balance().compat()).unwrap();
-    log!([balance]);   
+    log!([balance]);
 
     let redeem_script = address::build_redeem_script_address(&coin.as_ref().key_pair.public().address_hash()[..]);
-    
+
     let outputs = vec![TransactionOutput {
         script_pubkey: Builder::build_p2sh(&redeem_script).to_bytes(),
         value: 1001,
@@ -1292,6 +1293,7 @@ fn test_spend_segwit_p2_s_h_w_p_k_h() {
 }
 
 #[test]
+#[ignore]
 fn test_withdraw_segwit_p2_s_h_w_p_k_h() {
     let config = json!({
         "coin": "tBTC",

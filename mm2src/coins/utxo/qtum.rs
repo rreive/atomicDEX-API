@@ -25,7 +25,11 @@ pub trait QtumBasedCoin: AsRef<UtxoCoinFields> + UtxoCommonOps + MarketCoinOps {
         let balance = try_s!(
             self.as_ref()
                 .rpc_client
-                .display_balance(self.as_ref().my_address.clone(), self.as_ref().conf.account_address_type, self.as_ref().decimals)
+                .display_balance(
+                    self.as_ref().my_address.clone(),
+                    self.as_ref().conf.account_address_type,
+                    self.as_ref().decimals
+                )
                 .compat()
                 .await
         );
