@@ -285,7 +285,8 @@ where
 {
     let dust: u64 = coin.as_ref().dust_amount;
     let lock_time = (now_ms() / 1000) as u32;
-    let change_script_pubkey = Builder::build_p2pkh(&coin.as_ref().my_address.hash).to_bytes();
+    let change_script_pubkey = address::build_script_pub_key_with_coin(coin).to_bytes();
+
     let coin_tx_fee = match fee {
         Some(f) => f,
         None => try_map!(coin.get_tx_fee().await, GenerateTransactionError::Other),

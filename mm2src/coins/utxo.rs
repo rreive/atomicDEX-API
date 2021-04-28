@@ -1715,7 +1715,8 @@ where
                 .into_script()
                 .to_bytes();
             let sighash_type = 1;
-            let script_code = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
+            // let script_code = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
+            let script_code = Builder::build_p2pkh(&coin.as_ref().key_pair.public().address_hash());
             let sighash = signer.signature_hash(
                 input_index,
                 signer.inputs[input_index].amount,

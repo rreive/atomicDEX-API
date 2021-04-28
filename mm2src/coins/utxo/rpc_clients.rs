@@ -60,6 +60,8 @@ use tokio_rustls::{client::TlsStream, TlsConnector};
 #[cfg(not(target_arch = "wasm32"))]
 use webpki_roots::TLS_SERVER_ROOTS;
 
+use super::address;
+
 pub type AddressesByLabelResult = HashMap<String, AddressPurpose>;
 
 #[derive(Debug, Deserialize)]
@@ -1593,15 +1595,7 @@ impl UtxoRpcClientOps for ElectrumClient {
     fn get_block_count(&self) -> RpcRes<u64> { Box::new(self.blockchain_headers_subscribe().map(|r| r.block_height())) }
 
     fn display_balance(&self, address: Address, account_type: AccountAddressType, decimals: u8) -> RpcRes<BigDecimal> {
-        let hash = match account_type {
-            AccountAddressType::P2PKH => electrum_script_hash(&Builder::build_p2pkh(&address.hash)),
-            AccountAddressType::P2SHWPKH => {
-                let script = Builder::build_p2sh(&address.hash).to_bytes();
-                electrum_script_hash(&script[..])
-            },
-            AccountAddressType::P2WPKH => unimplemented!(),
-            AccountAddressType::P2WSH(_) => unimplemented!(),
-        };
+        let hash = electrum_script_hash(&address::build_script_pub_key(&address, account_type)[..]);
         let hash_str = hex::encode(hash);
         Box::new(self.scripthash_get_balance(&hash_str).map(move |result| {
             BigDecimal::from(result.confirmed + result.unconfirmed) / BigDecimal::from(10u64.pow(decimals as u32))

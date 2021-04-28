@@ -1,11 +1,11 @@
 pub use keys::{Address, AddressHash, KeyPair, Private, Public, Secret};
-use script::{Builder, Opcode};
+use script::{Builder, Opcode, Script};
 
 use crate::account::AccountAddressType;
 use crate::utxo::dhash160;
 use keys::bytes::Bytes;
 
-use super::UtxoCoinConf;
+use super::{UtxoCoinConf, UtxoCoinFields};
 
 pub fn build_redeem_script(keyhash: &[u8]) -> Bytes {
     let mut redeem_script = Bytes::new_with_len(22);
@@ -84,11 +84,7 @@ pub fn p2shwpkh(pk: &Public, conf: &UtxoCoinConf) -> Result<Address, String> {
         .push_bytes(&pk.address_hash()[..])
         .into_script();
     let to_hash = Bytes::from(script_sig);
-    log!({ "p2shwpkh hash payload {:?}", to_hash });
     let hash = dhash160(&to_hash[..]);
-    log!({ "hash result {}", hash });
-    log!({ "p2sh_addr_prefix {}", conf.p2sh_addr_prefix });
-    log!({ "p2sh_t_addr_prefix {}", conf.p2sh_t_addr_prefix });
     Ok(Address {
         prefix: conf.p2sh_addr_prefix,
         t_addr_prefix: conf.p2sh_t_addr_prefix,
@@ -122,6 +118,22 @@ pub fn p2shwpkh(pk: &Public, conf: &UtxoCoinConf) -> Result<Address, String> {
 //         payload: Payload::ScriptHash(ScriptHash::hash(&ws[..])),
 //     }
 // }
+
+pub fn build_script_pub_key_with_coin<T>(coin: &T) -> Script
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    build_script_pub_key(&coin.as_ref().my_address, coin.as_ref().conf.account_address_type)
+}
+
+pub fn build_script_pub_key(address: &Address, account: AccountAddressType) -> Script {
+    match account {
+        AccountAddressType::P2PKH => Builder::build_p2pkh(&address.hash),
+        AccountAddressType::P2SHWPKH => Builder::build_p2sh(&address.hash),
+        AccountAddressType::P2WPKH => unimplemented!(),
+        AccountAddressType::P2WSH(_) => unimplemented!(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

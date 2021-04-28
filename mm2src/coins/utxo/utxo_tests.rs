@@ -1235,17 +1235,16 @@ fn test_address_segwit_p2_s_h_w_p_k_h() {
 
 // https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki#p2sh-p2wpkh
 #[test]
-#[ignore]
 fn test_sign_segwit_p2_s_h_w_p_k_h() {
     let tx_str = "0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000";
     let tx_vec = hex::decode(tx_str).unwrap();
     let spend_tx: UtxoTx = deserialize(tx_vec.as_slice()).unwrap();
-    // spend_tx.lock_time = 92040000;
     log!("spend_tx: \t"[spend_tx]);
     let signer: TransactionInputSigner = spend_tx.into();
-    let redeem_script = Script::from("001479091972186c449eb1ded22b78e40d009bdf0089");
-    let _script_pubkey = Script::from("a9144733f37cf4db86fbc2efed2500b4f4e49f31202387");
-    let script_code = Builder::build_p2pkh(&dhash160(redeem_script.to_bytes().as_slice()));
+    let pub_key = Public::Compressed(H264::from(
+        "03ad1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a26873",
+    ));
+    let script_code = Builder::build_p2pkh(&pub_key.address_hash());
     let sighash = signer.signature_hash(
         0,
         1000000000,
@@ -1262,6 +1261,7 @@ fn test_sign_segwit_p2_s_h_w_p_k_h() {
 }
 
 #[test]
+#[ignore]
 fn test_spend_segwit_p2_s_h_w_p_k_h() {
     let config = json!({
         "coin": "tBTC",
@@ -1306,10 +1306,11 @@ fn test_spend_segwit_p2_s_h_w_p_k_h() {
     let balance = block_on(coin.my_balance().compat()).unwrap();
     log!([balance]);
 
-    let redeem_script = address::build_redeem_script_address(&coin.as_ref().key_pair.public().address_hash()[..]);
+    // let redeem_script = address::build_redeem_script_address(&coin.as_ref().key_pair.public().address_hash()[..]);
+    let script_pubkey = Builder::build_p2pkh(&coin.as_ref().key_pair.public().address_hash()).to_bytes();
 
     let outputs = vec![TransactionOutput {
-        script_pubkey: Builder::build_p2sh(&redeem_script).to_bytes(),
+        script_pubkey,
         value: 1001,
     }];
 
