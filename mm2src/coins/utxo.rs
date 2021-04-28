@@ -954,24 +954,24 @@ impl<'a> UtxoConfBuilder<'a> {
     fn is_pos(&self) -> bool { self.conf["isPoS"].as_u64() == Some(1) }
 
     fn segwit(&self) -> u32 {
-        self.req["full_segwit"].as_u64().map(|v| v as u32).unwrap_or(
+        self.req["full_segwit"].as_u64().map(|v| v as u32).unwrap_or_else(|| {
             self.conf["segwit"]
                 .as_u64()
                 .map(|v| v as u32)
-                .unwrap_or(DEFAULT_SUPPORTED_SEGWIT),
-        )
+                .unwrap_or_else(|| DEFAULT_SUPPORTED_SEGWIT)
+        })
     }
 
     fn account_address_type(&self) -> AccountAddressType {
         self.req["account_type"]
             .as_u64()
             .map(|v| AccountAddressType::from_u32(v as u32))
-            .unwrap_or(
+            .unwrap_or_else(|| {
                 self.conf["account_type"]
                     .as_u64()
                     .map(|v| AccountAddressType::from_u32(v as u32))
-                    .unwrap_or(AccountAddressType::default()),
-            )
+                    .unwrap_or_default()
+            })
     }
 
     fn mtp_block_count(&self) -> NonZeroU64 {
@@ -1530,6 +1530,7 @@ pub fn sat_from_big_decimal(amount: &BigDecimal, decimals: u8) -> Result<u64, St
         ))
 }
 
+#[allow(dead_code)]
 pub(crate) fn p2pkh_sign_tx(
     unsigned: TransactionInputSigner,
     key_pair: &KeyPair,
@@ -1765,6 +1766,7 @@ where
 }
 
 /// Creates signed input spending p2pkh output
+#[allow(dead_code)]
 fn p2pkh_spend(
     signer: &TransactionInputSigner,
     input_index: usize,

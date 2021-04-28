@@ -1233,8 +1233,35 @@ fn test_address_segwit_p2_s_h_w_p_k_h() {
     assert!(balance.spendable > BigDecimal::zero())
 }
 
+// https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki#p2sh-p2wpkh
 #[test]
 #[ignore]
+fn test_sign_segwit_p2_s_h_w_p_k_h() {
+    let tx_str = "0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac92040000";
+    let tx_vec = hex::decode(tx_str).unwrap();
+    let spend_tx: UtxoTx = deserialize(tx_vec.as_slice()).unwrap();
+    // spend_tx.lock_time = 92040000;
+    log!("spend_tx: \t"[spend_tx]);
+    let signer: TransactionInputSigner = spend_tx.into();
+    let redeem_script = Script::from("001479091972186c449eb1ded22b78e40d009bdf0089");
+    let _script_pubkey = Script::from("a9144733f37cf4db86fbc2efed2500b4f4e49f31202387");
+    let script_code = Builder::build_p2pkh(&dhash160(redeem_script.to_bytes().as_slice()));
+    let sighash = signer.signature_hash(
+        0,
+        1000000000,
+        &script_code,
+        SignatureVersion::WitnessV0,
+        Sighash::from_u32(SignatureVersion::WitnessV0, 1),
+    );
+    log!("sighash: \t"[sighash]);
+
+    assert_eq!(
+        sighash,
+        H256::from("64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6")
+    )
+}
+
+#[test]
 fn test_spend_segwit_p2_s_h_w_p_k_h() {
     let config = json!({
         "coin": "tBTC",
