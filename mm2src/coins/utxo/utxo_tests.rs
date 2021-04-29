@@ -1321,6 +1321,68 @@ fn test_spend_segwit_p2_s_h_w_p_k_h() {
 }
 
 #[test]
+fn test_withdraw_non_p2sh() {
+    let config = json!({
+        "coin": "tBTC",
+        "name": "tbitcoin",
+        "fname": "tBitcoin",
+        "rpcport": 18332,
+        "pubtype": 111,
+        "p2shtype": 196,
+        "wiftype": 239,
+        "txfee": 0,
+        "estimate_fee_mode": "ECONOMICAL",
+        "mm2": 1,
+        "required_confirmations": 0,
+        "dust": 100,
+        "protocol": {
+            "type": "UTXO"
+        }
+    });
+    let request = json!({
+        "method": "electrum",
+        "coin": "tBTC",
+        "servers": [{"url": "electrum1.cipig.net:10068"},{"url": "electrum2.cipig.net:10068"},{"url": "electrum3.cipig.net:10068"}],
+    });
+    let ctx = MmCtxBuilder::new().into_mm_arc();
+
+    // the private key obtained from the following seed:
+    // let default_seed = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
+    // spice describe gravity federal blast come thank unfair canal monkey style afraid
+    let priv_key = [
+        128, 148, 101, 177, 125, 10, 77, 219, 62, 76, 105, 232, 242, 60, 44, 171, 173, 134, 143, 81, 248, 190, 213,
+        199, 101, 173, 29, 101, 22, 195, 48, 111,
+    ];
+    let coin = block_on(utxo_standard_coin_from_conf_and_request(
+        &ctx, "tBTC", &config, &request, &priv_key,
+    ))
+    .expect("!utxo_standard_coin_from_conf_and_request");
+
+    let address = &coin.as_ref().my_address;
+    log!("addr: \t"(address));
+
+    let balance = block_on(coin.my_balance().compat()).unwrap();
+    log!([balance]);
+
+    let (unspents, _) = block_on(coin.ordered_mature_unspents(address)).unwrap();
+    log!([unspents]);
+
+    let withdraw_req = WithdrawRequest {
+        amount: "0.000001".parse().unwrap(),
+        to: "2N68eTqAncM9WLpUWebavTcDHzsaQeXZn2v".to_string(),
+        coin: coin.ticker().into(),
+        max: false,
+        fee: Some(WithdrawFee::UtxoFixed {
+            amount: "0.0000001".parse().unwrap(),
+        }),
+    };
+
+    let tx_details = coin.withdraw(withdraw_req).wait();
+    log!([tx_details]);
+    assert!(tx_details.is_err())
+}
+
+#[test]
 #[ignore]
 fn test_withdraw_segwit_p2_s_h_w_p_k_h() {
     let config = json!({
@@ -1366,12 +1428,12 @@ fn test_withdraw_segwit_p2_s_h_w_p_k_h() {
     let balance = block_on(coin.my_balance().compat()).unwrap();
     log!([balance]);
 
-    let (unspents, _) = block_on(coin.ordered_mature_unspents(&coin.as_ref().my_address)).unwrap();
+    let (unspents, _) = block_on(coin.ordered_mature_unspents(address)).unwrap();
     log!([unspents]);
 
     let withdraw_req = WithdrawRequest {
         amount: 1.into(),
-        to: "tb1qm5tfegjevj27yvvna9elym9lnzcf0zraxgl8z2".to_string(),
+        to: "mg2vB11K43itMLKgTg61xwi4SXW6Mj9Df3".to_string(),
         coin: coin.ticker().into(),
         max: false,
         fee: Some(WithdrawFee::UtxoFixed {

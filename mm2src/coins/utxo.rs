@@ -92,7 +92,7 @@ const UTXO_DUST_AMOUNT: u64 = 1000;
 /// 11 > 0
 const KMD_MTP_BLOCK_COUNT: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(11u64) };
 const DEFAULT_DYNAMIC_FEE_VOLATILITY_PERCENT: f64 = 0.5;
-const DEFAULT_SUPPORTED_SEGWIT: u32 = 49;
+const DEFAULT_SUPPORTED_SEGWIT: u32 = 44; // TODO: change to 49 prior segwit rollout
 
 #[cfg(windows)]
 #[cfg(not(target_arch = "wasm32"))]

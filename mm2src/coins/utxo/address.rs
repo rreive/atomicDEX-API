@@ -146,7 +146,7 @@ mod tests {
     use super::*;
 
     fn conf() -> UtxoCoinConf {
-        const TEST_COIN_NAME: &'static str = "BTC";
+        const TEST_COIN_NAME: &str = "BTC";
         let checksum_type = ChecksumType::DSHA256;
         UtxoCoinConf {
             is_pos: false,
