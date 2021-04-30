@@ -51,7 +51,7 @@ use num_traits::ToPrimitive;
 use primitives::hash::{H256, H264, H512};
 use rand::seq::SliceRandom;
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
-use script::{Builder, Opcode, Script, Sighash, SignatureVersion, TransactionInputSigner};
+use script::{Builder, Script, Sighash, SignatureVersion, TransactionInputSigner};
 use serde_json::{self as json, Value as Json};
 use serialization::serialize;
 use std::collections::{HashMap, HashSet};
