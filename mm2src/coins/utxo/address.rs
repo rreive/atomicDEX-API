@@ -7,17 +7,12 @@ use keys::bytes::Bytes;
 
 use super::{UtxoCoinConf, UtxoCoinFields};
 
-pub fn build_redeem_script(keyhash: &[u8]) -> Bytes {
-    let mut redeem_script = Bytes::new_with_len(22);
-    redeem_script[0] = Opcode::OP_0 as u8;
-    redeem_script[1] = Opcode::OP_PUSHBYTES_20 as u8;
-    redeem_script[2..22].clone_from_slice(keyhash);
-    redeem_script
-}
-
-pub fn build_redeem_script_address(keyhash: &[u8]) -> AddressHash {
-    let redeem_script = build_redeem_script(keyhash);
-    dhash160(&redeem_script)
+pub fn build_redeem_script(keyhash: &AddressHash) -> Script {
+    Builder::default()
+        .push_opcode(Opcode::OP_0)
+        // .push_opcode(Opcode::OP_PUSHBYTES_20)
+        .push_bytes(&**keyhash)
+        .into_script()
 }
 
 pub fn build_address(pk: &Public, conf: &UtxoCoinConf) -> Result<Address, String> {

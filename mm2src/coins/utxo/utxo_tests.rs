@@ -1244,7 +1244,29 @@ fn test_sign_segwit_p2_s_h_w_p_k_h() {
     let pub_key = Public::Compressed(H264::from(
         "03ad1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a26873",
     ));
-    let script_code = Builder::build_p2pkh(&pub_key.address_hash());
+    let address_hash = pub_key.address_hash();
+    log!("address_hash \t"(address_hash));
+    let redeem_script = address::build_redeem_script(&address_hash).to_bytes();
+    let redeem_script_encoded = hex::encode(&redeem_script[..]);
+    log!("redeem_script \t"(redeem_script_encoded));
+    assert_eq!(
+        redeem_script_encoded,
+        "001479091972186c449eb1ded22b78e40d009bdf0089".to_owned()
+    );
+
+    let script_pk_hash = Builder::default()
+        .push_opcode(Opcode::from_u8(0u8).expect("zero present"))
+        .push_bytes(&pub_key.address_hash()[..])
+        .into_script()
+        .to_bytes();
+    let hash = dhash160(&script_pk_hash[..]);
+    let public_script_key = Builder::build_p2sh(&hash).to_bytes();
+    assert_eq!(
+        public_script_key,
+        Bytes::from("a9144733f37cf4db86fbc2efed2500b4f4e49f31202387")
+    );
+
+    let script_code = Builder::build_p2pkh(&address_hash);
     let sighash = signer.signature_hash(
         0,
         1000000000,
@@ -1309,6 +1331,7 @@ fn test_spend_segwit_p2_s_h_w_p_k_h() {
     // let redeem_script = address::build_redeem_script_address(&coin.as_ref().key_pair.public().address_hash()[..]);
     let script_pubkey = Builder::build_p2pkh(&coin.as_ref().key_pair.public().address_hash()).to_bytes();
 
+    // let script_pubkey = Script::from("a9144733f37cf4db86fbc2efed2500b4f4e49f31202387").to_bytes();
     let outputs = vec![TransactionOutput {
         script_pubkey,
         value: 1001,

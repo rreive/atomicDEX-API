@@ -1687,7 +1687,8 @@ where
         AccountAddressType::P2WPKH => {
             let script_sig = Builder::default().into_script().to_bytes();
             let sighash_type = 1;
-            let script_code = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
+            // let script_code = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
+            let script_code = Builder::build_p2pkh(&coin.as_ref().key_pair.public().address_hash());
             let sighash = signer.signature_hash(
                 input_index,
                 signer.inputs[input_index].amount,
@@ -1709,13 +1710,8 @@ where
             })
         },
         AccountAddressType::P2SHWPKH => {
-            let script_sig = Builder::default()
-                .push_opcode(Opcode::from_u8(0u8).expect("zero present"))
-                .push_bytes(&key_pair.public().address_hash()[..])
-                .into_script()
-                .to_bytes();
+            let script_sig = address::build_redeem_script(&key_pair.public().address_hash()).to_bytes();
             let sighash_type = 1;
-            // let script_code = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
             let script_code = Builder::build_p2pkh(&coin.as_ref().key_pair.public().address_hash());
             let sighash = signer.signature_hash(
                 input_index,

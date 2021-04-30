@@ -1,4 +1,3 @@
-use crate::eth::{self, u256_to_big_decimal, wei_from_big_decimal, TryToAddress};
 use crate::qrc20::rpc_clients::{LogEntry, Qrc20ElectrumOps, Qrc20NativeOps, Qrc20RpcOps, TopicFilter, TxReceipt,
                                 ViewContractCallType};
 use crate::utxo::qtum::QtumBasedCoin;
@@ -7,6 +6,8 @@ use crate::utxo::utxo_common::{self, big_decimal_from_sat, check_all_inputs_sign
 use crate::utxo::{qtum, sign_tx, ActualTxFee, AdditionalTxData, FeePolicy, GenerateTransactionError,
                   RecentlySpentOutPoints, UtxoCoinBuilder, UtxoCoinFields, UtxoCommonOps, UtxoTx,
                   VerboseTransactionFrom, UTXO_LOCK};
+use crate::{account::AccountAddressType,
+            eth::{self, u256_to_big_decimal, wei_from_big_decimal, TryToAddress}};
 use crate::{CoinBalance, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, MarketCoinOps, MmCoin, SwapOps, TradeFee,
             TradePreimageError, TradePreimageValue, TransactionDetails, TransactionEnum, TransactionFut,
             ValidateAddressResult, WithdrawFee, WithdrawRequest};
@@ -1127,7 +1128,9 @@ async fn qrc20_withdraw(coin: Qrc20Coin, req: WithdrawRequest) -> Result<Transac
     let to_addr = try_s!(UtxoAddress::from_str(&req.to));
     let conf = &coin.utxo.conf;
     let is_p2pkh = to_addr.prefix == conf.pub_addr_prefix && to_addr.t_addr_prefix == conf.pub_t_addr_prefix;
-    let is_p2sh = to_addr.prefix == conf.p2sh_addr_prefix && to_addr.t_addr_prefix == conf.p2sh_t_addr_prefix;
+    let is_p2sh = to_addr.prefix == conf.p2sh_addr_prefix
+        && to_addr.t_addr_prefix == conf.p2sh_t_addr_prefix
+        && conf.segwit == AccountAddressType::P2SHWPKH.as_u32();
     if !is_p2pkh && !is_p2sh {
         return ERR!("Address {} has invalid format", to_addr);
     }
