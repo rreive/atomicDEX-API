@@ -17,6 +17,7 @@ use gstuff::now_ms;
 use mocktopus::mocking::*;
 use num_traits::Zero;
 use rpc::v1::types::H256 as H256Json;
+use script::Opcode;
 use serialization::deserialize;
 use std::thread;
 use std::time::Duration;
