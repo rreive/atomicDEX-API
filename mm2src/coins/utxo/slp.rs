@@ -22,17 +22,28 @@ use serialization_derive::Deserializable;
 use std::convert::TryInto;
 
 #[derive(Clone, Debug)]
-struct SlpToken {
+pub struct SlpToken {
     decimals: u8,
     ticker: String,
     token_id: H256,
     platform_utxo: UtxoStandardCoin,
 }
 
+impl SlpToken {
+    pub fn new(decimals: u8, ticker: String, token_id: H256, platform_utxo: UtxoStandardCoin) -> SlpToken {
+        SlpToken {
+            decimals,
+            ticker,
+            token_id,
+            platform_utxo,
+        }
+    }
+}
+
 /// https://slp.dev/specs/slp-token-type-1/#transaction-detail
 #[derive(Debug, Eq, PartialEq)]
 enum SlpTransaction {
-    /// https://slp.dev/specs/slp-token-type-1/#send-spend-transaction
+    /// https://slp.dev/specs/slp-token-type-1/#genesis-token-genesis-transaction
     Genesis {
         token_ticker: String,
         token_name: String,
@@ -42,8 +53,14 @@ enum SlpTransaction {
         mint_baton_vout: Vec<u8>,
         initial_token_mint_quantity: Vec<u8>,
     },
+    /// https://slp.dev/specs/slp-token-type-1/#mint-extended-minting-transaction
+    Mint {
+        token_id: Vec<u8>,
+        mint_baton_vout: Vec<u8>,
+        additional_token_quantity: Vec<u8>,
+    },
     /// https://slp.dev/specs/slp-token-type-1/#send-spend-transaction
-    Send { token_id: Vec<u8>, amount: Vec<u8> },
+    Send { token_id: Vec<u8>, amounts: Vec<u64> },
 }
 
 impl Deserializable for SlpTransaction {
@@ -95,10 +112,25 @@ impl Deserializable for SlpTransaction {
                     initial_token_mint_quantity,
                 })
             },
-            "SEND" => Ok(SlpTransaction::Send {
+            "MINT" => Ok(SlpTransaction::Mint {
                 token_id: reader.read_list()?,
-                amount: reader.read_list()?,
+                mint_baton_vout: reader.read_list()?,
+                additional_token_quantity: reader.read_list()?,
             }),
+            "SEND" => {
+                let token_id = reader.read_list()?;
+                let mut amounts = Vec::with_capacity(1);
+                while !reader.is_finished() {
+                    let bytes: Vec<u8> = reader.read_list()?;
+                    if bytes.len() != 8 {
+                        return Err(Error::Custom(format!("Expected 8 bytes, got {}", bytes.len())));
+                    }
+                    let amount = u64::from_be_bytes(bytes.try_into().expect("length is 8 bytes"));
+                    amounts.push(amount)
+                }
+
+                Ok(SlpTransaction::Send { token_id, amounts })
+            },
             _ => Err(Error::Custom(format!(
                 "Unsupported transaction type {}",
                 transaction_type
@@ -154,9 +186,9 @@ impl MarketCoinOps for SlpToken {
                 let script: Script = prev_tx.outputs[0].script_pubkey.clone().into();
                 if let Ok(slp_data) = parse_slp_script(&script) {
                     match slp_data.transaction {
-                        SlpTransaction::Send { token_id, amount } => {
-                            if H256::from(token_id.as_slice()) == coin.token_id && amount.len() == 8 {
-                                let satoshi = u64::from_be_bytes(amount.try_into().unwrap());
+                        SlpTransaction::Send { token_id, amounts } => {
+                            if H256::from(token_id.as_slice()) == coin.token_id {
+                                let satoshi = amounts[unspent.outpoint.index as usize - 1];
                                 let decimal = big_decimal_from_sat_unsigned(satoshi, coin.decimals);
                                 spendable += decimal;
                             }
@@ -167,6 +199,18 @@ impl MarketCoinOps for SlpToken {
                         } => {
                             if prev_tx.hash().reversed() == coin.token_id && initial_token_mint_quantity.len() == 8 {
                                 let satoshi = u64::from_be_bytes(initial_token_mint_quantity.try_into().unwrap());
+                                let decimal = big_decimal_from_sat_unsigned(satoshi, coin.decimals);
+                                spendable += decimal;
+                            }
+                        },
+                        SlpTransaction::Mint {
+                            token_id,
+                            additional_token_quantity,
+                            ..
+                        } => {
+                            if H256::from(token_id.as_slice()) == coin.token_id && additional_token_quantity.len() == 8
+                            {
+                                let satoshi = u64::from_be_bytes(additional_token_quantity.try_into().unwrap());
                                 let decimal = big_decimal_from_sat_unsigned(satoshi, coin.decimals);
                                 spendable += decimal;
                             }
@@ -415,19 +459,22 @@ impl MmCoin for SlpToken {
     fn mature_confirmations(&self) -> Option<u32> { unimplemented!() }
 }
 
+// https://slp.dev/specs/slp-token-type-1/#examples
 #[test]
 fn test_parse_slp_script() {
+    // Send single output
     let script = hex::decode("6a04534c500001010453454e4420e73b2b28c14db8ebbf97749988b539508990e1708021067f206f49d55807dbf4080000000005f5e100").unwrap();
     let slp_data = parse_slp_script(&script).unwrap();
     assert_eq!(slp_data.lokad_id, "SLP\0");
-    let expected_amount = 100000000u64.to_be_bytes().to_vec();
+    let expected_amount = 100000000u64;
     let expected_transaction = SlpTransaction::Send {
         token_id: hex::decode("e73b2b28c14db8ebbf97749988b539508990e1708021067f206f49d55807dbf4").unwrap(),
-        amount: expected_amount,
+        amounts: vec![expected_amount],
     };
 
     assert_eq!(expected_transaction, slp_data.transaction);
 
+    // Genesis
     let script =
         hex::decode("6a04534c500001010747454e45534953044144455804414445584c004c0001084c0008000000174876e800").unwrap();
     let slp_data = parse_slp_script(&script).unwrap();
@@ -445,6 +492,7 @@ fn test_parse_slp_script() {
 
     assert_eq!(expected_transaction, slp_data.transaction);
 
+    // Genesis from docs example
     let script =
         hex::decode("6a04534c500001010747454e45534953045553445423546574686572204c74642e20555320646f6c6c6172206261636b656420746f6b656e734168747470733a2f2f7465746865722e746f2f77702d636f6e74656e742f75706c6f6164732f323031362f30362f546574686572576869746550617065722e70646620db4451f11eda33950670aaf59e704da90117ff7057283b032cfaec77793139160108010208002386f26fc10000").unwrap();
     let slp_data = parse_slp_script(&script).unwrap();
@@ -460,5 +508,29 @@ fn test_parse_slp_script() {
         initial_token_mint_quantity,
     };
 
+    assert_eq!(expected_transaction, slp_data.transaction);
+
+    // Mint
+    let script =
+        hex::decode("6a04534c50000101044d494e5420550d19eb820e616a54b8a73372c4420b5a0567d8dc00f613b71c5234dc884b35010208002386f26fc10000").unwrap();
+    let slp_data = parse_slp_script(&script).unwrap();
+    assert_eq!(slp_data.lokad_id, "SLP\0");
+    let expected_transaction = SlpTransaction::Mint {
+        token_id: hex::decode("550d19eb820e616a54b8a73372c4420b5a0567d8dc00f613b71c5234dc884b35").unwrap(),
+        mint_baton_vout: vec![2],
+        additional_token_quantity: hex::decode("002386f26fc10000").unwrap(),
+    };
+
+    assert_eq!(expected_transaction, slp_data.transaction);
+
+    let script = hex::decode("6a04534c500001010453454e4420550d19eb820e616a54b8a73372c4420b5a0567d8dc00f613b71c5234dc884b350800000000000003e80800000000000003e90800000000000003ea").unwrap();
+    let token_id = hex::decode("550d19eb820e616a54b8a73372c4420b5a0567d8dc00f613b71c5234dc884b35").unwrap();
+
+    let slp_data = parse_slp_script(&script).unwrap();
+    assert_eq!(slp_data.lokad_id, "SLP\0");
+    let expected_transaction = SlpTransaction::Send {
+        token_id,
+        amounts: vec![1000, 1001, 1002],
+    };
     assert_eq!(expected_transaction, slp_data.transaction);
 }
