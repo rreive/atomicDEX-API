@@ -56,6 +56,8 @@ pub mod database;
 #[path = "mm2_tests.rs"]
 pub mod mm2_tests;
 
+#[path = "wasm_tests/wasm_tests.rs"] pub mod wasm_tests;
+
 const DEFAULT_LOG_FILTER: LogLevel = LogLevel::Info;
 pub const MM_DATETIME: &str = env!("MM_DATETIME");
 pub const MM_VERSION: &str = env!("MM_VERSION");
