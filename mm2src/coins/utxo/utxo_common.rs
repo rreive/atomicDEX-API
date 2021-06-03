@@ -1430,6 +1430,7 @@ where
         coin: coin.as_ref().conf.ticker.clone(),
         internal_id: vec![].into(),
         timestamp: now_ms() / 1000,
+        kmd_rewards: None, // TODO
     })
 }
 
@@ -1790,51 +1791,63 @@ pub async fn tx_details_by_hash<T>(coin: &T, hash: &[u8]) -> Result<TransactionD
 where
     T: AsRef<UtxoCoinFields> + UtxoCommonOps + Send + Sync + 'static,
 {
+    let ticker = &coin.as_ref().conf.ticker;
     let hash = H256Json::from(hash);
     let verbose_tx = try_s!(coin.as_ref().rpc_client.get_verbose_transaction(hash).compat().await);
     let mut tx: UtxoTx = try_s!(deserialize(verbose_tx.hex.as_slice()).map_err(|e| ERRL!("{:?}", e)));
     tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
-    let mut input_transactions: HashMap<&H256, UtxoTx> = HashMap::new();
+    let mut input_transactions: HashMap<&H256, RpcTransaction> = HashMap::new();
     let mut input_amount = 0;
     let mut output_amount = 0;
     let mut from_addresses = vec![];
     let mut to_addresses = vec![];
     let mut spent_by_me = 0;
     let mut received_by_me = 0;
+    let mut kmd_rewards = if ticker == "KMD" { Some(0) } else { None };
     for input in tx.inputs.iter() {
         // input transaction is zero if the tx is the coinbase transaction
         if input.previous_output.hash.is_zero() {
             continue;
         }
 
-        let input_tx = match input_transactions.entry(&input.previous_output.hash) {
+        let prev_tx_hash: H256Json = input.previous_output.hash.reversed().into();
+        let prev_verbose = match input_transactions.entry(&input.previous_output.hash) {
             Entry::Vacant(e) => {
-                let prev_hash = input.previous_output.hash.reversed();
-                let prev: BytesJson = try_s!(
+                let prev_verbose = try_s!(
                     coin.as_ref()
                         .rpc_client
-                        .get_transaction_bytes(prev_hash.clone().into())
+                        .get_verbose_transaction(prev_tx_hash.clone())
                         .compat()
                         .await
                 );
-                let mut prev_tx: UtxoTx =
-                    try_s!(deserialize(prev.as_slice()).map_err(|e| ERRL!("{:?}, tx: {:?}", e, prev_hash)));
-                prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
-                e.insert(prev_tx)
+                e.insert(prev_verbose)
             },
             Entry::Occupied(e) => e.into_mut(),
         };
-        input_amount += input_tx.outputs[input.previous_output.index as usize].value;
+        let mut prev_tx: UtxoTx =
+            deserialize(prev_verbose.hex.as_slice()).map_err(|e| ERRL!("{:?}, tx: {:?}", e, prev_tx_hash))?;
+        prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
+
+        let prev_tx_value = prev_tx.outputs[input.previous_output.index as usize].value;
+        input_amount += prev_tx_value;
         let from: Vec<Address> = try_s!(coin.addresses_from_script(
-            &input_tx.outputs[input.previous_output.index as usize]
+            &prev_tx.outputs[input.previous_output.index as usize]
                 .script_pubkey
                 .clone()
                 .into()
         ));
         if from.contains(&coin.as_ref().my_address) {
-            spent_by_me += input_tx.outputs[input.previous_output.index as usize].value;
+            spent_by_me += prev_tx_value;
         }
         from_addresses.push(from);
+
+        if let Some(ref mut kmd_rewards) = kmd_rewards {
+            let prev_tx_locktime = prev_verbose.locktime as u64;
+            let this_tx_locktime = verbose_tx.locktime as u64;
+            if let Ok(interest) = kmd_interest(prev_verbose.height, prev_tx_value, prev_tx_locktime, this_tx_locktime) {
+                *kmd_rewards += interest;
+            }
+        }
     }
 
     for output in tx.outputs.iter() {
@@ -1845,6 +1858,18 @@ where
         }
         to_addresses.push(to);
     }
+
+    let fee = match kmd_rewards {
+        Some(kmd_rewards) => {
+            // `input_amount = output_amount + fee`, where `output_amount = actual_output_amount + kmd_rewards`,
+            // so to calculate an actual transaction fee, we have to subtract the `kmd_rewards` from the total `output_amount`:
+            // `fee = input_amount - actual_output_amount` or simplified `fee = input_amount - output_amount + kmd_rewards`
+            input_amount as i64 - output_amount as i64 + kmd_rewards as i64
+        },
+        None => input_amount as i64 - output_amount as i64,
+    };
+    let fee = big_decimal_from_sat(fee, coin.as_ref().decimals);
+
     // remove address duplicates in case several inputs were spent from same address
     // or several outputs are sent to same address
     let mut from_addresses: Vec<String> = try_s!(from_addresses
@@ -1862,21 +1887,21 @@ where
     to_addresses.sort();
     to_addresses.dedup();
 
-    let fee = big_decimal_from_sat(input_amount as i64 - output_amount as i64, coin.as_ref().decimals);
     Ok(TransactionDetails {
         from: from_addresses,
         to: to_addresses,
-        received_by_me: big_decimal_from_sat(received_by_me as i64, coin.as_ref().decimals),
-        spent_by_me: big_decimal_from_sat(spent_by_me as i64, coin.as_ref().decimals),
+        received_by_me: big_decimal_from_sat_unsigned(received_by_me, coin.as_ref().decimals),
+        spent_by_me: big_decimal_from_sat_unsigned(spent_by_me, coin.as_ref().decimals),
         my_balance_change: big_decimal_from_sat(received_by_me as i64 - spent_by_me as i64, coin.as_ref().decimals),
-        total_amount: big_decimal_from_sat(input_amount as i64, coin.as_ref().decimals),
+        total_amount: big_decimal_from_sat_unsigned(input_amount, coin.as_ref().decimals),
         tx_hash: tx.hash().reversed().to_vec().into(),
         tx_hex: verbose_tx.hex,
         fee_details: Some(UtxoFeeDetails { amount: fee }.into()),
         block_height: verbose_tx.height.unwrap_or(0),
-        coin: coin.as_ref().conf.ticker.clone(),
+        coin: ticker.clone(),
         internal_id: tx.hash().reversed().to_vec().into(),
         timestamp: verbose_tx.time.into(),
+        kmd_rewards: kmd_rewards.map(|rewards| big_decimal_from_sat_unsigned(rewards, coin.as_ref().decimals)),
     })
 }
 

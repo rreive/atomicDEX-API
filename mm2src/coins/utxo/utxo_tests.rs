@@ -5,7 +5,7 @@ use crate::utxo::rpc_clients::{GetAddressInfoRes, UtxoRpcClientOps, ValidateAddr
 use crate::utxo::utxo_common::{dex_fee_script, generate_transaction, p2sh_spending_tx, UtxoArcBuilder};
 use crate::utxo::utxo_standard::{utxo_standard_coin_from_conf_and_request, UtxoStandardCoin};
 #[cfg(not(target_arch = "wasm32"))] use crate::WithdrawFee;
-use crate::{CoinBalance, SwapOps, TradePreimageValue};
+use crate::{CoinBalance, SwapOps, TradePreimageValue, TxFeeDetails};
 use bigdecimal::BigDecimal;
 use chain::constants::SEQUENCE_FINAL;
 use chain::OutPoint;
@@ -2653,4 +2653,46 @@ fn send_and_redeem_dex_fee() {
     let tx = serialize(&refund);
     let tx_hash = coin.send_raw_tx(&hex::encode(tx.take())).wait().unwrap();
     println!("redeem {}", tx_hash);
+}
+
+#[test]
+fn test_tx_details_kmd_rewards() {
+    let electrum = electrum_client_for_test(&[
+        "electrum1.cipig.net:10001",
+        "electrum2.cipig.net:10001",
+        "electrum3.cipig.net:10001",
+    ]);
+    let mut fields = utxo_coin_fields_for_test(electrum.into(), None);
+    fields.conf.ticker = "KMD".to_owned();
+    let coin = utxo_coin_from_fields(fields);
+
+    let hash = hex::decode("535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024").unwrap();
+    let tx_details = block_on(coin.tx_details_by_hash(&hash)).expect("!tx_details_by_hash");
+
+    let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
+        amount: BigDecimal::from_str("0.00001").unwrap(),
+    });
+    assert_eq!(tx_details.fee_details, Some(expected_fee));
+
+    let expected_kmd_rewards = BigDecimal::from_str("0.10431954").unwrap();
+    assert_eq!(tx_details.kmd_rewards, Some(expected_kmd_rewards));
+}
+
+#[test]
+fn test_tx_details_bch_no_rewards() {
+    let electrum = electrum_client_for_test(&[
+        "blackie.c3-soft.com:60001",
+        "bch0.kister.net:51001",
+        "testnet.imaginary.cash:50001",
+    ]);
+    let coin = utxo_coin_for_test(electrum.into(), None);
+
+    let hash = hex::decode("eb13d926f15cbb896e0bcc7a1a77a4ec63504e57a1524c13a7a9b80f43ecb05c").unwrap();
+    let tx_details = block_on(coin.tx_details_by_hash(&hash)).expect("!tx_details_by_hash");
+
+    let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
+        amount: BigDecimal::from_str("0.00000452").unwrap(),
+    });
+    assert_eq!(tx_details.fee_details, Some(expected_fee));
+    assert_eq!(tx_details.kmd_rewards, None);
 }

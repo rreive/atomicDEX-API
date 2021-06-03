@@ -459,6 +459,9 @@ pub struct TransactionDetails {
     coin: String,
     /// Internal MM2 id used for internal transaction identification, for some coins it might be equal to transaction hash
     internal_id: BytesJson,
+    /// Amount of accrued rewards.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kmd_rewards: Option<BigDecimal>,
 }
 
 impl TransactionDetails {

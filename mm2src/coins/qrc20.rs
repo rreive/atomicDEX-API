@@ -1270,6 +1270,7 @@ async fn qrc20_withdraw(coin: Qrc20Coin, req: WithdrawRequest) -> WithdrawResult
         coin: conf.ticker.clone(),
         internal_id: vec![].into(),
         timestamp: now_ms() / 1000,
+        kmd_rewards: None,
     })
 }
 
