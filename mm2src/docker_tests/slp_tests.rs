@@ -3,6 +3,7 @@ use bitcoin_cash_slp::{slp_genesis_output, SlpTokenType};
 use chain::TransactionOutput;
 use coins::utxo::slp::SlpToken;
 use coins::utxo::utxo_common::send_outputs_from_my_address;
+use coins::Transaction;
 use keys::{KeyPair, Private};
 use script::Builder;
 
@@ -36,4 +37,7 @@ fn mint_slp_token() {
     let balance = slp.my_balance().wait().unwrap();
     let expected = BigDecimal::from(1000);
     assert_eq!(expected, balance.spendable);
+
+    let tx = block_on(slp.send_htlc(keypair.public(), (now_ms() / 1000) as u32, &[0; 20], 10000)).unwrap();
+    println!("{}", hex::encode(tx.tx_hex()));
 }

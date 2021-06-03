@@ -2,20 +2,28 @@
 #![allow(unused_variables)]
 
 use super::utxo_standard::UtxoStandardCoin;
-use crate::utxo::utxo_common::big_decimal_from_sat_unsigned;
-use crate::utxo::{UtxoCommonOps, UtxoTx};
-use crate::{BalanceFut, CoinBalance, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, MarketCoinOps, MmCoin,
-            NegotiateSwapContractAddrErr, SwapOps, TradeFee, TradePreimageFut, TradePreimageValue, TransactionEnum,
-            TransactionFut, ValidateAddressResult, WithdrawFut, WithdrawRequest};
+use crate::utxo::rpc_clients::{UnspentInfo, UtxoRpcClientEnum, UtxoRpcError};
+use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, payment_script};
+use crate::utxo::{generate_and_send_tx, FeePolicy, RecentlySpentOutPoints, UtxoCommonOps, UtxoTx};
+use crate::{BalanceError, BalanceFut, CoinBalance, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, MarketCoinOps,
+            MmCoin, NegotiateSwapContractAddrErr, SwapOps, TradeFee, TradePreimageFut, TradePreimageValue,
+            TransactionEnum, TransactionFut, ValidateAddressResult, WithdrawFut, WithdrawRequest};
+use bitcoin_cash_slp::{slp_send_output, SlpTokenType, TokenId};
+use bitcrypto::dhash160;
+use chain::TransactionOutput;
 use common::mm_ctx::MmArc;
-use common::mm_error::MmError;
+use common::mm_error::prelude::*;
 use common::mm_number::{BigDecimal, MmNumber};
+use derive_more::Display;
 use futures::compat::Future01CompatExt;
+use futures::lock::MutexGuard as AsyncMutexGuard;
 use futures::{FutureExt, TryFutureExt};
 use futures01::Future;
+use keys::Public;
 use primitives::hash::H256;
 use rpc::v1::types::Bytes as BytesJson;
-use script::{Opcode, Script};
+use script::bytes::Bytes;
+use script::{Builder as ScriptBuilder, Opcode};
 use serde_json::Value as Json;
 use serialization::{deserialize, Deserializable, Error, Reader};
 use serialization_derive::Deserializable;
@@ -29,6 +37,23 @@ pub struct SlpToken {
     platform_utxo: UtxoStandardCoin,
 }
 
+struct SlpUnspent {
+    bch_unspent: UnspentInfo,
+    slp_amount: u64,
+}
+
+struct SlpOutput {
+    amount: u64,
+    script_pubkey: Bytes,
+}
+
+/// The SLP transaction preimage
+struct SlpTxPreimage<'a> {
+    inputs: Vec<UnspentInfo>,
+    outputs: Vec<TransactionOutput>,
+    recently_spent: AsyncMutexGuard<'a, RecentlySpentOutPoints>,
+}
+
 impl SlpToken {
     pub fn new(decimals: u8, ticker: String, token_id: H256, platform_utxo: UtxoStandardCoin) -> SlpToken {
         SlpToken {
@@ -37,6 +62,171 @@ impl SlpToken {
             token_id,
             platform_utxo,
         }
+    }
+
+    fn rpc(&self) -> &UtxoRpcClientEnum { &self.platform_utxo.as_ref().rpc_client }
+
+    /// Returns unspents of the SLP token plus plain BCH UTXOs plus RecentlySpentOutPoints mutex guard
+    async fn slp_unspents(
+        &self,
+    ) -> Result<
+        (
+            Vec<SlpUnspent>,
+            Vec<UnspentInfo>,
+            AsyncMutexGuard<'_, RecentlySpentOutPoints>,
+        ),
+        MmError<SlpUnspentsErr>,
+    > {
+        let (unspents, recently_spent) = self
+            .platform_utxo
+            .list_unspent_ordered(&self.platform_utxo.as_ref().my_address)
+            .await?;
+
+        let mut slp_unspents = vec![];
+        let mut bch_unspents = vec![];
+
+        for unspent in unspents {
+            let prev_tx_bytes = self
+                .rpc()
+                .get_transaction_bytes(unspent.outpoint.hash.reversed().into())
+                .compat()
+                .await?;
+            let prev_tx: UtxoTx = deserialize(prev_tx_bytes.0.as_slice()).map_to_mm(SlpUnspentsErr::from)?;
+            match parse_slp_script(&prev_tx.outputs[0].script_pubkey) {
+                Ok(slp_data) => match slp_data.transaction {
+                    SlpTransaction::Send { token_id, amounts } => {
+                        if H256::from(token_id.as_slice()) == self.token_id {
+                            match amounts.get(unspent.outpoint.index as usize - 1) {
+                                Some(slp_amount) => slp_unspents.push(SlpUnspent {
+                                    bch_unspent: unspent,
+                                    slp_amount: *slp_amount,
+                                }),
+                                None => bch_unspents.push(unspent),
+                            }
+                        }
+                    },
+                    SlpTransaction::Genesis {
+                        initial_token_mint_quantity,
+                        ..
+                    } => {
+                        if prev_tx.hash().reversed() == self.token_id
+                            && initial_token_mint_quantity.len() == 8
+                            && unspent.outpoint.index == 1
+                        {
+                            let slp_amount = u64::from_be_bytes(initial_token_mint_quantity.try_into().unwrap());
+                            slp_unspents.push(SlpUnspent {
+                                bch_unspent: unspent,
+                                slp_amount,
+                            });
+                        } else {
+                            bch_unspents.push(unspent)
+                        }
+                    },
+                    SlpTransaction::Mint {
+                        token_id,
+                        additional_token_quantity,
+                        ..
+                    } => {
+                        if H256::from(token_id.as_slice()) == self.token_id && additional_token_quantity.len() == 8 {
+                            let slp_amount = u64::from_be_bytes(additional_token_quantity.try_into().unwrap());
+                            slp_unspents.push(SlpUnspent {
+                                bch_unspent: unspent,
+                                slp_amount,
+                            });
+                        }
+                    },
+                },
+                Err(_) => bch_unspents.push(unspent),
+            }
+        }
+
+        slp_unspents.sort_by(|a, b| a.slp_amount.cmp(&b.slp_amount));
+        Ok((slp_unspents, bch_unspents, recently_spent))
+    }
+
+    /// Generates the inputs and outputs set to spend the SLP from my address to the desired destinations (script pubkeys)
+    async fn generate_slp_tx_preimage(
+        &self,
+        slp_outputs: Vec<SlpOutput>,
+    ) -> Result<SlpTxPreimage<'_>, MmError<GenSlpSpendErr>> {
+        let (slp_unspents, bch_unspents, recently_spent) = self.slp_unspents().await?;
+        let total_slp_output = slp_outputs.iter().fold(0, |cur, slp_out| cur + slp_out.amount);
+        let mut total_slp_input = 0;
+
+        let mut inputs = vec![];
+        for slp_utxo in slp_unspents {
+            if total_slp_input >= total_slp_output {
+                break;
+            }
+
+            total_slp_input += slp_utxo.slp_amount;
+            inputs.push(slp_utxo.bch_unspent);
+        }
+
+        if total_slp_input < total_slp_output {
+            return MmError::err(GenSlpSpendErr::InsufficientSlpBalance);
+        }
+        let change = total_slp_input - total_slp_output;
+
+        inputs.extend(bch_unspents);
+
+        let mut amounts_for_op_return: Vec<_> = slp_outputs.iter().map(|spend_to| spend_to.amount).collect();
+        if change > 0 {
+            amounts_for_op_return.push(change);
+        }
+
+        // TODO generate the script in MM2 instead of using the external library
+        let op_return_out = slp_send_output(
+            SlpTokenType::Fungible,
+            &TokenId::from_slice(&*self.token_id).unwrap(),
+            &amounts_for_op_return,
+        );
+        let op_return_out_mm = TransactionOutput {
+            value: 0,
+            script_pubkey: op_return_out.script.serialize().unwrap().to_vec().into(),
+        };
+        let mut outputs = vec![op_return_out_mm];
+
+        outputs.extend(slp_outputs.into_iter().map(|spend_to| TransactionOutput {
+            value: self.platform_utxo.as_ref().dust_amount,
+            script_pubkey: spend_to.script_pubkey,
+        }));
+
+        if change > 0 {
+            let slp_change_out = TransactionOutput {
+                value: self.platform_utxo.as_ref().dust_amount,
+                script_pubkey: ScriptBuilder::build_p2pkh(&self.platform_utxo.my_public_key().address_hash())
+                    .to_bytes(),
+            };
+            outputs.push(slp_change_out);
+        }
+
+        Ok(SlpTxPreimage {
+            inputs,
+            outputs,
+            recently_spent,
+        })
+    }
+
+    pub async fn send_htlc(
+        &self,
+        other_pub: &Public,
+        time_lock: u32,
+        secret_hash: &[u8],
+        amount: u64,
+    ) -> Result<UtxoTx, String> {
+        let payment_script = payment_script(time_lock, secret_hash, self.platform_utxo.my_public_key(), other_pub);
+        let script_pubkey = ScriptBuilder::build_p2sh(&dhash160(&payment_script)).to_bytes();
+        let slp_out = SlpOutput { amount, script_pubkey };
+        let preimage = try_s!(self.generate_slp_tx_preimage(vec![slp_out]).await);
+        generate_and_send_tx(
+            &self.platform_utxo,
+            preimage.inputs,
+            preimage.outputs,
+            FeePolicy::SendExact,
+            preimage.recently_spent,
+        )
+        .await
     }
 }
 
@@ -151,11 +341,53 @@ struct SlpTxDetails {
 enum ParseSlpScriptError {
     NotOpReturn,
     NotSlp,
+    DeserializeFailed(Error),
 }
 
-fn parse_slp_script(script: &[u8]) -> Result<SlpTxDetails, ParseSlpScriptError> {
-    let details: SlpTxDetails = deserialize(script).unwrap();
+impl From<Error> for ParseSlpScriptError {
+    fn from(err: Error) -> ParseSlpScriptError { ParseSlpScriptError::DeserializeFailed(err) }
+}
+
+fn parse_slp_script(script: &[u8]) -> Result<SlpTxDetails, MmError<ParseSlpScriptError>> {
+    let details: SlpTxDetails = deserialize(script).map_to_mm(ParseSlpScriptError::from)?;
+    if Opcode::from_u8(details.op_code) != Some(Opcode::OP_RETURN) {
+        return MmError::err(ParseSlpScriptError::NotOpReturn);
+    }
     Ok(details)
+}
+
+#[derive(Debug, Display)]
+enum SlpUnspentsErr {
+    RpcError(UtxoRpcError),
+    #[display(fmt = "TxDeserializeError: {:?}", _0)]
+    TxDeserializeError(Error),
+}
+
+impl From<UtxoRpcError> for SlpUnspentsErr {
+    fn from(err: UtxoRpcError) -> SlpUnspentsErr { SlpUnspentsErr::RpcError(err) }
+}
+
+impl From<Error> for SlpUnspentsErr {
+    fn from(err: Error) -> SlpUnspentsErr { SlpUnspentsErr::TxDeserializeError(err) }
+}
+
+impl From<SlpUnspentsErr> for BalanceError {
+    fn from(err: SlpUnspentsErr) -> BalanceError {
+        match err {
+            SlpUnspentsErr::RpcError(e) => BalanceError::Transport(e.to_string()),
+            SlpUnspentsErr::TxDeserializeError(e) => BalanceError::Internal(format!("{:?}", e)),
+        }
+    }
+}
+
+#[derive(Debug, Display)]
+enum GenSlpSpendErr {
+    GetUnspentsErr(SlpUnspentsErr),
+    InsufficientSlpBalance,
+}
+
+impl From<SlpUnspentsErr> for GenSlpSpendErr {
+    fn from(err: SlpUnspentsErr) -> GenSlpSpendErr { GenSlpSpendErr::GetUnspentsErr(err) }
 }
 
 impl MarketCoinOps for SlpToken {
@@ -166,58 +398,9 @@ impl MarketCoinOps for SlpToken {
     fn my_balance(&self) -> BalanceFut<CoinBalance> {
         let coin = self.clone();
         let fut = async move {
-            let (unspents, _) = coin
-                .platform_utxo
-                .list_unspent_ordered(&coin.platform_utxo.as_ref().my_address)
-                .await?;
-            let mut spendable = 0.into();
-            for unspent in unspents {
-                if unspent.value != coin.platform_utxo.as_ref().dust_amount {
-                    continue;
-                }
-                let prev_tx_bytes = coin
-                    .platform_utxo
-                    .as_ref()
-                    .rpc_client
-                    .get_transaction_bytes(unspent.outpoint.hash.reversed().into())
-                    .compat()
-                    .await?;
-                let prev_tx: UtxoTx = deserialize(prev_tx_bytes.0.as_slice()).unwrap();
-                let script: Script = prev_tx.outputs[0].script_pubkey.clone().into();
-                if let Ok(slp_data) = parse_slp_script(&script) {
-                    match slp_data.transaction {
-                        SlpTransaction::Send { token_id, amounts } => {
-                            if H256::from(token_id.as_slice()) == coin.token_id {
-                                let satoshi = amounts[unspent.outpoint.index as usize - 1];
-                                let decimal = big_decimal_from_sat_unsigned(satoshi, coin.decimals);
-                                spendable += decimal;
-                            }
-                        },
-                        SlpTransaction::Genesis {
-                            initial_token_mint_quantity,
-                            ..
-                        } => {
-                            if prev_tx.hash().reversed() == coin.token_id && initial_token_mint_quantity.len() == 8 {
-                                let satoshi = u64::from_be_bytes(initial_token_mint_quantity.try_into().unwrap());
-                                let decimal = big_decimal_from_sat_unsigned(satoshi, coin.decimals);
-                                spendable += decimal;
-                            }
-                        },
-                        SlpTransaction::Mint {
-                            token_id,
-                            additional_token_quantity,
-                            ..
-                        } => {
-                            if H256::from(token_id.as_slice()) == coin.token_id && additional_token_quantity.len() == 8
-                            {
-                                let satoshi = u64::from_be_bytes(additional_token_quantity.try_into().unwrap());
-                                let decimal = big_decimal_from_sat_unsigned(satoshi, coin.decimals);
-                                spendable += decimal;
-                            }
-                        },
-                    }
-                }
-            }
+            let (slp_unspents, _, _) = coin.slp_unspents().await?;
+            let spendable_sat = slp_unspents.iter().fold(0, |cur, unspent| cur + unspent.slp_amount);
+            let spendable = big_decimal_from_sat_unsigned(spendable_sat, coin.decimals);
             Ok(CoinBalance {
                 spendable,
                 unspendable: 0.into(),
