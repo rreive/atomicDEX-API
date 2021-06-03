@@ -177,6 +177,7 @@ pub struct AdditionalTxData {
     pub spent_by_me: u64,
     pub fee_amount: u64,
     pub unused_change: Option<u64>,
+    pub kmd_rewards: Option<u64>,
 }
 
 /// The fee set from coins config

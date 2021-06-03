@@ -478,6 +478,8 @@ where
         received_by_me,
         spent_by_me: sum_inputs,
         unused_change,
+        // will be changed if the ticker is KMD
+        kmd_rewards: None,
     };
 
     Ok(coin.calc_interest_if_required(tx, data, change_script_pubkey).await?)
@@ -536,6 +538,7 @@ where
         // if interest is zero attempt to set the lowest possible lock_time to claim it later
         unsigned.lock_time = (now_ms() / 1000) as u32 - 3600 + 777 * 2;
     }
+    data.kmd_rewards = Some(interest);
     Ok((unsigned, data))
 }
 
@@ -1332,6 +1335,7 @@ pub async fn withdraw<T>(coin: T, req: WithdrawRequest) -> WithdrawResult
 where
     T: AsRef<UtxoCoinFields> + UtxoCommonOps + MarketCoinOps,
 {
+    let decimals = coin.as_ref().decimals;
     let to = coin
         .address_from_str(&req.to)
         .map_to_mm(WithdrawError::InvalidAddress)?;
@@ -1368,17 +1372,17 @@ where
             FeePolicy::DeductFromOutput(0),
         )
     } else {
-        let value = sat_from_big_decimal(&req.amount, coin.as_ref().decimals)?;
+        let value = sat_from_big_decimal(&req.amount, decimals)?;
         (value, FeePolicy::SendExact)
     };
     let outputs = vec![TransactionOutput { value, script_pubkey }];
     let fee = match req.fee {
         Some(WithdrawFee::UtxoFixed { amount }) => {
-            let fixed = sat_from_big_decimal(&amount, coin.as_ref().decimals)?;
+            let fixed = sat_from_big_decimal(&amount, decimals)?;
             Some(ActualTxFee::Fixed(fixed))
         },
         Some(WithdrawFee::UtxoPerKbyte { amount }) => {
-            let dynamic = sat_from_big_decimal(&amount, coin.as_ref().decimals)?;
+            let dynamic = sat_from_big_decimal(&amount, decimals)?;
             Some(ActualTxFee::Dynamic(dynamic))
         },
         Some(fee_policy) => {
@@ -1395,7 +1399,7 @@ where
         .generate_transaction(unspents, outputs, fee_policy, fee, gas_fee)
         .await
         .mm_err(|gen_tx_error| {
-            WithdrawError::from_generate_tx_error(gen_tx_error, coin.ticker().to_owned(), coin.as_ref().decimals)
+            WithdrawError::from_generate_tx_error(gen_tx_error, coin.ticker().to_owned(), decimals)
         })?;
     let prev_script = Builder::build_p2pkh(&coin.as_ref().my_address.hash);
     let signed = sign_tx(
@@ -1409,20 +1413,20 @@ where
 
     let fee_amount = data.fee_amount + data.unused_change.unwrap_or_default();
     let fee_details = UtxoFeeDetails {
-        amount: big_decimal_from_sat(fee_amount as i64, coin.as_ref().decimals),
+        amount: big_decimal_from_sat(fee_amount as i64, decimals),
     };
     let my_address = coin.my_address().map_to_mm(WithdrawError::InternalError)?;
     let to_address = coin.display_address(&to).map_to_mm(WithdrawError::InternalError)?;
+    let kmd_rewards = data
+        .kmd_rewards
+        .map(|rewards| big_decimal_from_sat_unsigned(rewards, decimals));
     Ok(TransactionDetails {
         from: vec![my_address],
         to: vec![to_address],
-        total_amount: big_decimal_from_sat(data.spent_by_me as i64, coin.as_ref().decimals),
-        spent_by_me: big_decimal_from_sat(data.spent_by_me as i64, coin.as_ref().decimals),
-        received_by_me: big_decimal_from_sat(data.received_by_me as i64, coin.as_ref().decimals),
-        my_balance_change: big_decimal_from_sat(
-            data.received_by_me as i64 - data.spent_by_me as i64,
-            coin.as_ref().decimals,
-        ),
+        total_amount: big_decimal_from_sat(data.spent_by_me as i64, decimals),
+        spent_by_me: big_decimal_from_sat(data.spent_by_me as i64, decimals),
+        received_by_me: big_decimal_from_sat(data.received_by_me as i64, decimals),
+        my_balance_change: big_decimal_from_sat(data.received_by_me as i64 - data.spent_by_me as i64, decimals),
         tx_hash: signed.hash().reversed().to_vec().into(),
         tx_hex: serialize(&signed).into(),
         fee_details: Some(fee_details.into()),
@@ -1430,7 +1434,7 @@ where
         coin: coin.as_ref().conf.ticker.clone(),
         internal_id: vec![].into(),
         timestamp: now_ms() / 1000,
-        kmd_rewards: None, // TODO
+        kmd_rewards,
     })
 }
 

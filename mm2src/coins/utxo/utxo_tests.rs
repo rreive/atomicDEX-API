@@ -693,6 +693,125 @@ fn test_withdraw_impl_sat_per_kb_fee_max() {
     assert_eq!(expected, tx_details.fee_details);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn test_withdraw_kmd_rewards_impl(
+    tx_hash: &'static str,
+    tx_hex: &'static str,
+    verbose_serialized: &str,
+    current_mtp: u32,
+    expected_rewards: Option<BigDecimal>,
+) {
+    let verbose: RpcTransaction = json::from_str(verbose_serialized).unwrap();
+    let unspent_height = verbose.height;
+    UtxoStandardCoin::ordered_mature_unspents.mock_safe(move |coin, _| {
+        let tx: UtxoTx = tx_hex.into();
+        let unspents = vec![UnspentInfo {
+            outpoint: OutPoint {
+                hash: tx.hash(),
+                index: 0,
+            },
+            value: tx.outputs[0].value,
+            height: unspent_height,
+        }];
+        let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        MockResult::Return(Box::pin(futures::future::ok((unspents, cache))))
+    });
+    UtxoStandardCoin::get_current_mtp
+        .mock_safe(move |_fields| MockResult::Return(Box::pin(futures::future::ok(current_mtp))));
+    NativeClient::get_verbose_transaction.mock_safe(move |_coin, txid| {
+        let expected: H256Json = hex::decode(tx_hash).unwrap().as_slice().into();
+        assert_eq!(txid, expected);
+        MockResult::Return(Box::new(futures01::future::ok(verbose.clone())))
+    });
+
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None);
+    fields.conf.ticker = "KMD".to_owned();
+    let coin = utxo_coin_from_fields(fields);
+
+    let withdraw_req = WithdrawRequest {
+        amount: BigDecimal::from_str("0.00001").unwrap(),
+        to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
+        coin: "KMD".to_owned(),
+        max: false,
+        fee: None,
+    };
+    let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
+        amount: "0.00001".parse().unwrap(),
+    });
+    let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
+    assert_eq!(tx_details.fee_details, Some(expected_fee));
+    assert_eq!(tx_details.kmd_rewards, expected_rewards);
+}
+
+/// https://kmdexplorer.io/tx/535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_withdraw_kmd_rewards() {
+    const TX_HASH: &str = "535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024";
+    const TX_HEX: &str = "0400008085202f8901afcadb73880bc1c9e7ce96b8274c2e2a4547415e649f425f98791685be009b73020000006b483045022100b8fbb77efea482b656ad16fc53c5a01d289054c2e429bf1d7bab16c3e822a83602200b87368a95c046b2ce6d0d092185138a3f234a7eb0d7f8227b196ef32358b93f012103b1e544ce2d860219bc91314b5483421a553a7b33044659eff0be9214ed58adddffffffff01dd15c293000000001976a91483762a373935ca241d557dfce89171d582b486de88ac99fe9960000000000000000000000000000000";
+    const VERBOSE_SERIALIZED: &str = r#"{"hex":"0400008085202f8901afcadb73880bc1c9e7ce96b8274c2e2a4547415e649f425f98791685be009b73020000006b483045022100b8fbb77efea482b656ad16fc53c5a01d289054c2e429bf1d7bab16c3e822a83602200b87368a95c046b2ce6d0d092185138a3f234a7eb0d7f8227b196ef32358b93f012103b1e544ce2d860219bc91314b5483421a553a7b33044659eff0be9214ed58adddffffffff01dd15c293000000001976a91483762a373935ca241d557dfce89171d582b486de88ac99fe9960000000000000000000000000000000","txid":"535ffa3387d3fca14f4a4d373daf7edf00e463982755afce89bc8c48d8168024","hash":null,"size":null,"vsize":null,"version":4,"locktime":1620704921,"vin":[{"txid":"739b00be851679985f429f645e4147452a2e4c27b896cee7c9c10b8873dbcaaf","vout":2,"scriptSig":{"asm":"3045022100b8fbb77efea482b656ad16fc53c5a01d289054c2e429bf1d7bab16c3e822a83602200b87368a95c046b2ce6d0d092185138a3f234a7eb0d7f8227b196ef32358b93f[ALL] 03b1e544ce2d860219bc91314b5483421a553a7b33044659eff0be9214ed58addd","hex":"483045022100b8fbb77efea482b656ad16fc53c5a01d289054c2e429bf1d7bab16c3e822a83602200b87368a95c046b2ce6d0d092185138a3f234a7eb0d7f8227b196ef32358b93f012103b1e544ce2d860219bc91314b5483421a553a7b33044659eff0be9214ed58addd"},"sequence":4294967295,"txinwitness":null}],"vout":[{"value":24.78970333,"n":0,"scriptPubKey":{"asm":"OP_DUP OP_HASH160 83762a373935ca241d557dfce89171d582b486de OP_EQUALVERIFY OP_CHECKSIG","hex":"76a91483762a373935ca241d557dfce89171d582b486de88ac","reqSigs":1,"type":"pubkeyhash","addresses":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk"]}}],"blockhash":"0b438a8e50afddb38fb1c7be4536ffc7f7723b76bbc5edf7c28f2c17924dbdfa","confirmations":33186,"rawconfirmations":33186,"time":1620705483,"blocktime":1620705483,"height":2387532}"#;
+    const CURRENT_MTP: u32 = 1622724281;
+
+    let expected_rewards = BigDecimal::from_str("0.07895295").unwrap();
+    test_withdraw_kmd_rewards_impl(TX_HASH, TX_HEX, VERBOSE_SERIALIZED, CURRENT_MTP, Some(expected_rewards));
+}
+
+/// If the ticker is `KMD` AND no rewards were accrued due to a value less than 10 or for any other reasons,
+/// then `TransactionDetails::kmd_rewards` has to be `Some(0)`, not `None`.
+/// https://kmdexplorer.io/tx/8c43e5a0402648faa5d0ae3550137544507ab1553425fa1b6f481a66a53f7a2d
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_withdraw_kmd_rewards_zero() {
+    const TX_HASH: &str = "8c43e5a0402648faa5d0ae3550137544507ab1553425fa1b6f481a66a53f7a2d";
+    const TX_HEX: &str = "0400008085202f8901c3651b6fb9ddf372e7a9d4d829c27eeea6cdfaab4f2e6e3527905c2a14f3702b010000006a47304402206819b3e51f076841ed5946bc9a48b9d75024b60abd8e854bfe50cbdfae8a268e022001a3648d2a4b33a761090676e4a8c676ee67cb602f29fef74ea5bbb8b516a178012103832b54342019dd5ecc08f1143757fbcf4ac6c8696653d456a84b40f34653c9a8ffffffff0200e1f505000000001976a91483762a373935ca241d557dfce89171d582b486de88ac60040c35000000001976a9142b33504039790fde428e4ab084aa1baf6aee209288acb0edd45f000000000000000000000000000000";
+    const VERBOSE_SERIALIZED: &str = r#"{"hex":"0400008085202f8901c3651b6fb9ddf372e7a9d4d829c27eeea6cdfaab4f2e6e3527905c2a14f3702b010000006a47304402206819b3e51f076841ed5946bc9a48b9d75024b60abd8e854bfe50cbdfae8a268e022001a3648d2a4b33a761090676e4a8c676ee67cb602f29fef74ea5bbb8b516a178012103832b54342019dd5ecc08f1143757fbcf4ac6c8696653d456a84b40f34653c9a8ffffffff0200e1f505000000001976a91483762a373935ca241d557dfce89171d582b486de88ac60040c35000000001976a9142b33504039790fde428e4ab084aa1baf6aee209288acb0edd45f000000000000000000000000000000","txid":"8c43e5a0402648faa5d0ae3550137544507ab1553425fa1b6f481a66a53f7a2d","hash":null,"size":null,"vsize":null,"version":4,"locktime":1607790000,"vin":[{"txid":"2b70f3142a5c9027356e2e4fabfacda6ee7ec229d8d4a9e772f3ddb96f1b65c3","vout":1,"scriptSig":{"asm":"304402206819b3e51f076841ed5946bc9a48b9d75024b60abd8e854bfe50cbdfae8a268e022001a3648d2a4b33a761090676e4a8c676ee67cb602f29fef74ea5bbb8b516a178[ALL] 03832b54342019dd5ecc08f1143757fbcf4ac6c8696653d456a84b40f34653c9a8","hex":"47304402206819b3e51f076841ed5946bc9a48b9d75024b60abd8e854bfe50cbdfae8a268e022001a3648d2a4b33a761090676e4a8c676ee67cb602f29fef74ea5bbb8b516a178012103832b54342019dd5ecc08f1143757fbcf4ac6c8696653d456a84b40f34653c9a8"},"sequence":4294967295,"txinwitness":null}],"vout":[{"value":1.0,"n":0,"scriptPubKey":{"asm":"OP_DUP OP_HASH160 83762a373935ca241d557dfce89171d582b486de OP_EQUALVERIFY OP_CHECKSIG","hex":"76a91483762a373935ca241d557dfce89171d582b486de88ac","reqSigs":1,"type":"pubkeyhash","addresses":["RMGJ9tRST45RnwEKHPGgBLuY3moSYP7Mhk"]}},{"value":8.8998,"n":1,"scriptPubKey":{"asm":"OP_DUP OP_HASH160 2b33504039790fde428e4ab084aa1baf6aee2092 OP_EQUALVERIFY OP_CHECKSIG","hex":"76a9142b33504039790fde428e4ab084aa1baf6aee209288ac","reqSigs":1,"type":"pubkeyhash","addresses":["RDDcc63q27t6k95LrysuDwtwrxuAXqNiXe"]}}],"blockhash":"0000000054ed9fc7a4316430659e127eac5776ebc2d2382db0cb9be3eb970d7b","confirmations":243859,"rawconfirmations":243859,"time":1607790977,"blocktime":1607790977,"height":2177114}"#;
+    const CURRENT_MTP: u32 = 1622724281;
+
+    let expected_rewards = BigDecimal::from(0);
+    test_withdraw_kmd_rewards_impl(TX_HASH, TX_HEX, VERBOSE_SERIALIZED, CURRENT_MTP, Some(expected_rewards));
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_withdraw_rick_rewards_none() {
+    // https://rick.explorer.dexstats.info/tx/7181400be323acc6b5f3164240e6c4601ff4c252f40ce7649f87e81634330209
+    const TX_HEX: &str = "0400008085202f8901df8119c507aa61d32332cd246dbfeb3818a4f96e76492454c1fbba5aa097977e000000004847304402205a7e229ea6929c97fd6dde254c19e4eb890a90353249721701ae7a1c477d99c402206a8b7c5bf42b5095585731d6b4c589ce557f63c20aed69ff242eca22ecfcdc7a01feffffff02d04d1bffbc050000232102afdbba3e3c90db5f0f4064118f79cf308f926c68afd64ea7afc930975663e4c4ac402dd913000000001976a9143e17014eca06281ee600adffa34b4afb0922a22288ac2bdab86035a00e000000000000000000000000";
+
+    UtxoStandardCoin::ordered_mature_unspents.mock_safe(move |coin, _| {
+        let tx: UtxoTx = TX_HEX.into();
+        let unspents = vec![UnspentInfo {
+            outpoint: OutPoint {
+                hash: tx.hash(),
+                index: 0,
+            },
+            value: tx.outputs[0].value,
+            height: Some(1431628),
+        }];
+        let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        MockResult::Return(Box::pin(futures::future::ok((unspents, cache))))
+    });
+
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+
+    let coin = utxo_coin_for_test(UtxoRpcClientEnum::Native(client), None);
+
+    let withdraw_req = WithdrawRequest {
+        amount: BigDecimal::from_str("0.00001").unwrap(),
+        to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
+        coin: "RICK".to_owned(),
+        max: false,
+        fee: None,
+    };
+    let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
+        amount: "0.00001".parse().unwrap(),
+    });
+    let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
+    assert_eq!(tx_details.fee_details, Some(expected_fee));
+    assert_eq!(tx_details.kmd_rewards, None);
+}
+
 #[test]
 fn test_ordered_mature_unspents_without_tx_cache() {
     let client = electrum_client_for_test(&["electrum1.cipig.net:10017", "electrum2.cipig.net:10017"]);
