@@ -1,19 +1,23 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use super::p2pkh_spend;
 use super::utxo_standard::UtxoStandardCoin;
 use crate::utxo::rpc_clients::{UnspentInfo, UtxoRpcClientEnum, UtxoRpcError};
-use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, payment_script};
+use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, generate_transaction, p2sh_spend, payment_script};
+use crate::utxo::utxo_standard::utxo_standard_coin_from_conf_and_request;
 use crate::utxo::{generate_and_send_tx, FeePolicy, RecentlySpentOutPoints, UtxoCommonOps, UtxoTx};
 use crate::{BalanceError, BalanceFut, CoinBalance, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, MarketCoinOps,
             MmCoin, NegotiateSwapContractAddrErr, SwapOps, TradeFee, TradePreimageFut, TradePreimageValue,
-            TransactionEnum, TransactionFut, ValidateAddressResult, WithdrawFut, WithdrawRequest};
+            Transaction, TransactionEnum, TransactionFut, ValidateAddressResult, WithdrawFut, WithdrawRequest};
 use bitcoin_cash_slp::{slp_send_output, SlpTokenType, TokenId};
 use bitcrypto::dhash160;
-use chain::TransactionOutput;
-use common::mm_ctx::MmArc;
+use chain::{OutPoint, TransactionOutput};
+use common::mm_ctx::{MmArc, MmCtxBuilder};
 use common::mm_error::prelude::*;
 use common::mm_number::{BigDecimal, MmNumber};
+use common::privkey::key_pair_from_seed;
+use common::{block_on, now_ms};
 use derive_more::Display;
 use futures::compat::Future01CompatExt;
 use futures::lock::MutexGuard as AsyncMutexGuard;
@@ -23,9 +27,9 @@ use keys::Public;
 use primitives::hash::H256;
 use rpc::v1::types::Bytes as BytesJson;
 use script::bytes::Bytes;
-use script::{Builder as ScriptBuilder, Opcode};
+use script::{Builder as ScriptBuilder, Opcode, Script, TransactionInputSigner};
 use serde_json::Value as Json;
-use serialization::{deserialize, Deserializable, Error, Reader};
+use serialization::{deserialize, serialize, Deserializable, Error, Reader};
 use serialization_derive::Deserializable;
 use std::convert::TryInto;
 
@@ -37,11 +41,13 @@ pub struct SlpToken {
     platform_utxo: UtxoStandardCoin,
 }
 
-struct SlpUnspent {
-    bch_unspent: UnspentInfo,
-    slp_amount: u64,
+#[derive(Clone, Debug)]
+pub struct SlpUnspent {
+    pub bch_unspent: UnspentInfo,
+    pub slp_amount: u64,
 }
 
+#[derive(Clone, Debug)]
 struct SlpOutput {
     amount: u64,
     script_pubkey: Bytes,
@@ -188,13 +194,13 @@ impl SlpToken {
         let mut outputs = vec![op_return_out_mm];
 
         outputs.extend(slp_outputs.into_iter().map(|spend_to| TransactionOutput {
-            value: self.platform_utxo.as_ref().dust_amount,
+            value: self.dust(),
             script_pubkey: spend_to.script_pubkey,
         }));
 
         if change > 0 {
             let slp_change_out = TransactionOutput {
-                value: self.platform_utxo.as_ref().dust_amount,
+                value: self.dust(),
                 script_pubkey: ScriptBuilder::build_p2pkh(&self.platform_utxo.my_public_key().address_hash())
                     .to_bytes(),
             };
@@ -228,6 +234,108 @@ impl SlpToken {
         )
         .await
     }
+
+    pub async fn spend_p2sh(
+        &self,
+        p2sh_utxo: SlpUnspent,
+        script_data: Script,
+        redeem_script: Script,
+    ) -> Result<UtxoTx, String> {
+        let op_return = slp_send_output(
+            SlpTokenType::Fungible,
+            &TokenId::from_slice(&*self.token_id).unwrap(),
+            &[p2sh_utxo.slp_amount],
+        );
+        let op_return_out_mm = TransactionOutput {
+            value: 0,
+            script_pubkey: op_return.script.serialize().unwrap().to_vec().into(),
+        };
+        let mut outputs = Vec::with_capacity(3);
+        outputs.push(op_return_out_mm);
+
+        let my_script_pubkey = ScriptBuilder::build_p2pkh(&self.platform_utxo.my_public_key().address_hash());
+        let slp_output = TransactionOutput {
+            value: self.dust(),
+            script_pubkey: my_script_pubkey.to_bytes(),
+        };
+        outputs.push(slp_output);
+
+        let (_, mut bch_inputs, recently_spent) = try_s!(self.slp_unspents().await);
+        bch_inputs.insert(0, p2sh_utxo.bch_unspent);
+        let (unsigned, _) = try_s!(
+            generate_transaction(
+                &self.platform_utxo,
+                bch_inputs,
+                outputs,
+                FeePolicy::SendExact,
+                None,
+                None,
+            )
+            .await
+        );
+
+        let signed_p2sh_input = try_s!(p2sh_spend(
+            &unsigned,
+            0,
+            &self.platform_utxo.as_ref().key_pair,
+            script_data,
+            redeem_script,
+            self.platform_utxo.as_ref().conf.signature_version,
+            self.platform_utxo.as_ref().conf.fork_id
+        ));
+
+        let signed_inputs: Result<Vec<_>, _> = unsigned
+            .inputs
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, input)| {
+                p2pkh_spend(
+                    &unsigned,
+                    i,
+                    &self.platform_utxo.as_ref().key_pair,
+                    &my_script_pubkey,
+                    self.platform_utxo.as_ref().conf.signature_version,
+                    self.platform_utxo.as_ref().conf.fork_id,
+                )
+            })
+            .collect();
+
+        let mut signed_inputs = try_s!(signed_inputs);
+
+        signed_inputs.insert(0, signed_p2sh_input);
+
+        let signed = UtxoTx {
+            version: unsigned.version,
+            n_time: unsigned.n_time,
+            overwintered: unsigned.overwintered,
+            version_group_id: unsigned.version_group_id,
+            inputs: signed_inputs,
+            outputs: unsigned.outputs,
+            lock_time: unsigned.lock_time,
+            expiry_height: unsigned.expiry_height,
+            shielded_spends: unsigned.shielded_spends,
+            shielded_outputs: unsigned.shielded_outputs,
+            join_splits: unsigned.join_splits,
+            value_balance: unsigned.value_balance,
+            join_split_pubkey: Default::default(),
+            join_split_sig: Default::default(),
+            binding_sig: Default::default(),
+            zcash: unsigned.zcash,
+            str_d_zeel: unsigned.str_d_zeel,
+            tx_hash_algo: self.platform_utxo.as_ref().tx_hash_algo,
+        };
+
+        let _broadcast = try_s!(
+            self.rpc()
+                .send_raw_transaction(serialize(&signed).into())
+                .compat()
+                .await
+        );
+        Ok(signed)
+    }
+
+    pub fn dust(&self) -> u64 { self.platform_utxo.as_ref().dust_amount }
 }
 
 /// https://slp.dev/specs/slp-token-type-1/#transaction-detail
@@ -716,4 +824,69 @@ fn test_parse_slp_script() {
         amounts: vec![1000, 1001, 1002],
     };
     assert_eq!(expected_transaction, slp_data.transaction);
+}
+
+#[test]
+fn send_and_spend_htlc_on_testnet() {
+    let ctx = MmCtxBuilder::default().into_mm_arc();
+    let keypair = key_pair_from_seed("BCH SLP test").unwrap();
+
+    let conf = json!({"coin":"BCH","pubtype":0,"p2shtype":5,"mm2":1,"fork_id":"0x40","protocol":{"type":"UTXO"},
+         "address_format":{"format":"cashaddress","network":"bchtest"}});
+    let req = json!({
+        "method": "electrum",
+        "coin": "BCH",
+        "servers": [{"url":"blackie.c3-soft.com:60001"},{"url":"testnet.imaginary.cash:50001"}],
+    });
+    let bch = block_on(utxo_standard_coin_from_conf_and_request(
+        &ctx,
+        "BCH",
+        &conf,
+        &req,
+        &*keypair.private().secret,
+    ))
+    .unwrap();
+
+    let balance = bch.my_balance().wait().unwrap();
+    println!("{}", balance.spendable);
+
+    let address = bch.my_address().unwrap();
+    println!("{}", address);
+
+    let token_id = H256::from("bb309e48930671582bea508f9a1d9b491e49b69be3d6f372dc08da2ac6e90eb7");
+    let fusd = SlpToken::new(4, "FUSD".into(), token_id, bch);
+
+    let fusd_balance = fusd.my_balance().wait().unwrap();
+    println!("FUSD {}", fusd_balance.spendable);
+
+    let secret = [0; 32];
+    let secret_hash = dhash160(&secret);
+    let time_lock = (now_ms() / 1000) as u32;
+    let amount = 10000;
+
+    let tx = block_on(fusd.send_htlc(keypair.public(), time_lock, &*secret_hash, amount)).unwrap();
+    println!("{}", hex::encode(tx.tx_hex()));
+
+    let bch_unspent = UnspentInfo {
+        outpoint: OutPoint {
+            hash: H256::from(tx.tx_hash().0.as_slice()).reversed(),
+            index: 1,
+        },
+        value: fusd.dust(),
+        height: None,
+    };
+    let slp_p2sh_utxo = SlpUnspent {
+        bch_unspent,
+        slp_amount: amount,
+    };
+
+    let redeem_script = payment_script(time_lock, &*secret_hash, keypair.public(), keypair.public());
+    let script_data = ScriptBuilder::default()
+        .push_data(&secret)
+        .push_opcode(Opcode::OP_0)
+        .into_script();
+
+    let spending_tx = block_on(fusd.spend_p2sh(slp_p2sh_utxo, script_data, redeem_script)).unwrap();
+    println!("spend hex {}", hex::encode(spending_tx.tx_hex()));
+    println!("spend hash {}", hex::encode(spending_tx.tx_hash().0));
 }
