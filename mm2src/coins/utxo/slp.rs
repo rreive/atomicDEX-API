@@ -4,14 +4,15 @@
 use super::p2pkh_spend;
 use super::utxo_standard::UtxoStandardCoin;
 use crate::utxo::rpc_clients::{UnspentInfo, UtxoRpcClientEnum, UtxoRpcError};
-use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, generate_transaction, p2sh_spend, payment_script};
+use crate::utxo::utxo_common::{self, big_decimal_from_sat_unsigned, generate_transaction, p2sh_spend, payment_script};
 use crate::utxo::utxo_standard::utxo_standard_coin_from_conf_and_request;
-use crate::utxo::{generate_and_send_tx, FeePolicy, RecentlySpentOutPoints, UtxoCommonOps, UtxoTx};
+use crate::utxo::{generate_and_send_tx, sat_from_big_decimal, FeePolicy, RecentlySpentOutPoints, UtxoCommonOps, UtxoTx};
 use crate::{BalanceError, BalanceFut, CoinBalance, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, MarketCoinOps,
             MmCoin, NegotiateSwapContractAddrErr, SwapOps, TradeFee, TradePreimageFut, TradePreimageValue,
             Transaction, TransactionEnum, TransactionFut, ValidateAddressResult, WithdrawFut, WithdrawRequest};
 use bitcoin_cash_slp::{slp_send_output, SlpTokenType, TokenId};
 use bitcrypto::dhash160;
+use chain::constants::SEQUENCE_FINAL;
 use chain::{OutPoint, TransactionOutput};
 use common::mm_ctx::{MmArc, MmCtxBuilder};
 use common::mm_error::prelude::*;
@@ -27,7 +28,7 @@ use keys::Public;
 use primitives::hash::H256;
 use rpc::v1::types::Bytes as BytesJson;
 use script::bytes::Bytes;
-use script::{Builder as ScriptBuilder, Opcode, Script, TransactionInputSigner};
+use script::{Builder as ScriptBuilder, Opcode, Script};
 use serde_json::Value as Json;
 use serialization::{deserialize, serialize, Deserializable, Error, Reader};
 use serialization_derive::Deserializable;
@@ -238,6 +239,8 @@ impl SlpToken {
     pub async fn spend_p2sh(
         &self,
         p2sh_utxo: SlpUnspent,
+        tx_locktime: u32,
+        input_sequence: u32,
         script_data: Script,
         redeem_script: Script,
     ) -> Result<UtxoTx, String> {
@@ -262,7 +265,7 @@ impl SlpToken {
 
         let (_, mut bch_inputs, recently_spent) = try_s!(self.slp_unspents().await);
         bch_inputs.insert(0, p2sh_utxo.bch_unspent);
-        let (unsigned, _) = try_s!(
+        let (mut unsigned, _) = try_s!(
             generate_transaction(
                 &self.platform_utxo,
                 bch_inputs,
@@ -273,6 +276,9 @@ impl SlpToken {
             )
             .await
         );
+
+        unsigned.lock_time = tx_locktime;
+        unsigned.inputs[0].sequence = input_sequence;
 
         let signed_p2sh_input = try_s!(p2sh_spend(
             &unsigned,
@@ -517,10 +523,14 @@ impl MarketCoinOps for SlpToken {
         Box::new(fut.boxed().compat())
     }
 
-    fn base_coin_balance(&self) -> BalanceFut<BigDecimal> { unimplemented!() }
+    fn base_coin_balance(&self) -> BalanceFut<BigDecimal> {
+        Box::new(self.platform_utxo.my_balance().map(|res| res.spendable))
+    }
 
     /// Receives raw transaction bytes in hexadecimal format as input and returns tx hash in hexadecimal format
-    fn send_raw_tx(&self, tx: &str) -> Box<dyn Future<Item = String, Error = String> + Send> { unimplemented!() }
+    fn send_raw_tx(&self, tx: &str) -> Box<dyn Future<Item = String, Error = String> + Send> {
+        self.platform_utxo.send_raw_tx(tx)
+    }
 
     fn wait_for_confirmations(
         &self,
@@ -530,7 +540,8 @@ impl MarketCoinOps for SlpToken {
         wait_until: u64,
         check_every: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        unimplemented!()
+        self.platform_utxo
+            .wait_for_confirmations(tx, confirmations, requires_nota, wait_until, check_every)
     }
 
     fn wait_for_tx_spend(
@@ -543,21 +554,42 @@ impl MarketCoinOps for SlpToken {
         unimplemented!()
     }
 
-    fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, String> { unimplemented!() }
+    fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, String> {
+        self.platform_utxo.tx_enum_from_bytes(bytes)
+    }
 
-    fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> { unimplemented!() }
+    fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> { self.platform_utxo.current_block() }
 
     fn address_from_pubkey_str(&self, pubkey: &str) -> Result<String, String> { unimplemented!() }
 
-    fn display_priv_key(&self) -> String { unimplemented!() }
+    fn display_priv_key(&self) -> String { self.platform_utxo.display_priv_key() }
 
-    fn min_tx_amount(&self) -> BigDecimal { unimplemented!() }
+    fn min_tx_amount(&self) -> BigDecimal { big_decimal_from_sat_unsigned(1, self.decimals) }
 
-    fn min_trading_vol(&self) -> MmNumber { MmNumber::from("0.00777") }
+    fn min_trading_vol(&self) -> MmNumber { big_decimal_from_sat_unsigned(1, self.decimals).into() }
 }
 
 impl SwapOps for SlpToken {
-    fn send_taker_fee(&self, fee_addr: &[u8], amount: BigDecimal) -> TransactionFut { unimplemented!() }
+    fn send_taker_fee(&self, fee_addr: &[u8], amount: BigDecimal) -> TransactionFut {
+        let coin = self.clone();
+        let fee_pubkey = try_fus!(Public::from_slice(fee_addr));
+        let script_pubkey = ScriptBuilder::build_p2pkh(&fee_pubkey.address_hash()).into();
+        let amount = try_fus!(sat_from_big_decimal(&amount, self.decimals));
+
+        let fut = async move {
+            let slp_out = SlpOutput { amount, script_pubkey };
+            let preimage = try_s!(coin.generate_slp_tx_preimage(vec![slp_out]).await);
+            generate_and_send_tx(
+                &coin.platform_utxo,
+                preimage.inputs,
+                preimage.outputs,
+                FeePolicy::SendExact,
+                preimage.recently_spent,
+            )
+            .await
+        };
+        Box::new(fut.boxed().compat().map(|tx| tx.into()))
+    }
 
     fn send_maker_payment(
         &self,
@@ -706,11 +738,11 @@ impl SwapOps for SlpToken {
 }
 
 impl MmCoin for SlpToken {
-    fn is_asset_chain(&self) -> bool { unimplemented!() }
+    fn is_asset_chain(&self) -> bool { false }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut { unimplemented!() }
 
-    fn decimals(&self) -> u8 { unimplemented!() }
+    fn decimals(&self) -> u8 { self.decimals }
 
     fn convert_to_address(&self, from: &str, to_address_format: Json) -> Result<String, String> { unimplemented!() }
 
@@ -745,9 +777,9 @@ impl MmCoin for SlpToken {
 
     fn set_requires_notarization(&self, _requires_nota: bool) { unimplemented!() }
 
-    fn swap_contract_address(&self) -> Option<BytesJson> { unimplemented!() }
+    fn swap_contract_address(&self) -> Option<BytesJson> { None }
 
-    fn mature_confirmations(&self) -> Option<u32> { unimplemented!() }
+    fn mature_confirmations(&self) -> Option<u32> { self.platform_utxo.mature_confirmations() }
 }
 
 // https://slp.dev/specs/slp-token-type-1/#examples
@@ -886,7 +918,71 @@ fn send_and_spend_htlc_on_testnet() {
         .push_opcode(Opcode::OP_0)
         .into_script();
 
-    let spending_tx = block_on(fusd.spend_p2sh(slp_p2sh_utxo, script_data, redeem_script)).unwrap();
+    let spending_tx =
+        block_on(fusd.spend_p2sh(slp_p2sh_utxo, time_lock, SEQUENCE_FINAL, script_data, redeem_script)).unwrap();
     println!("spend hex {}", hex::encode(spending_tx.tx_hex()));
     println!("spend hash {}", hex::encode(spending_tx.tx_hash().0));
+}
+
+#[test]
+fn send_and_refund_htlc_on_testnet() {
+    let ctx = MmCtxBuilder::default().into_mm_arc();
+    let keypair = key_pair_from_seed("BCH SLP test").unwrap();
+
+    let conf = json!({"coin":"BCH","pubtype":0,"p2shtype":5,"mm2":1,"fork_id":"0x40","protocol":{"type":"UTXO"},
+         "address_format":{"format":"cashaddress","network":"bchtest"}});
+    let req = json!({
+        "method": "electrum",
+        "coin": "BCH",
+        "servers": [{"url":"blackie.c3-soft.com:60001"},{"url":"testnet.imaginary.cash:50001"}],
+    });
+    let bch = block_on(utxo_standard_coin_from_conf_and_request(
+        &ctx,
+        "BCH",
+        &conf,
+        &req,
+        &*keypair.private().secret,
+    ))
+    .unwrap();
+
+    let balance = bch.my_balance().wait().unwrap();
+    println!("{}", balance.spendable);
+
+    let address = bch.my_address().unwrap();
+    println!("{}", address);
+
+    let token_id = H256::from("bb309e48930671582bea508f9a1d9b491e49b69be3d6f372dc08da2ac6e90eb7");
+    let fusd = SlpToken::new(4, "FUSD".into(), token_id, bch);
+
+    let fusd_balance = fusd.my_balance().wait().unwrap();
+    println!("FUSD {}", fusd_balance.spendable);
+
+    let secret = [0; 32];
+    let secret_hash = dhash160(&secret);
+    let time_lock = (now_ms() / 1000) as u32 - 7200;
+    let amount = 10000;
+
+    let tx = block_on(fusd.send_htlc(keypair.public(), time_lock, &*secret_hash, amount)).unwrap();
+    println!("{}", hex::encode(tx.tx_hex()));
+
+    let bch_unspent = UnspentInfo {
+        outpoint: OutPoint {
+            hash: H256::from(tx.tx_hash().0.as_slice()).reversed(),
+            index: 1,
+        },
+        value: fusd.dust(),
+        height: None,
+    };
+    let slp_p2sh_utxo = SlpUnspent {
+        bch_unspent,
+        slp_amount: amount,
+    };
+
+    let redeem_script = payment_script(time_lock, &*secret_hash, keypair.public(), keypair.public());
+    let script_data = ScriptBuilder::default().push_opcode(Opcode::OP_1).into_script();
+
+    let refund_tx =
+        block_on(fusd.spend_p2sh(slp_p2sh_utxo, time_lock, SEQUENCE_FINAL - 1, script_data, redeem_script)).unwrap();
+    println!("refund hex {}", hex::encode(refund_tx.tx_hex()));
+    println!("refund hash {}", hex::encode(refund_tx.tx_hash().0));
 }
